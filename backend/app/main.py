@@ -11,12 +11,14 @@ from fastapi.responses import StreamingResponse
 from app.config import get_settings
 from app.schemas import SearchRequest, SearchResponse
 from app.services.ai_service import DeepSeekService
+from app.services.cache_service import SearchResponseCache
 from app.services.search_service import TavilySearchService
 from app.services.sse import format_sse
 
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name)
+search_cache = SearchResponseCache()
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +48,10 @@ async def health() -> dict[str, str]:
 @app.post("/api/search", response_model=SearchResponse)
 async def search_once(request: SearchRequest) -> SearchResponse:
     """Run the full search pipeline without streaming."""
+    cached = search_cache.get(request.query)
+    if cached is not None:
+        return cached
+
     search_service = get_search_service()
     ai_service = get_ai_service()
     results = await search_service.search(request.query)
@@ -56,12 +62,14 @@ async def search_once(request: SearchRequest) -> SearchResponse:
 
     answer = "".join(answer_parts)
     related = await ai_service.generate_related_questions(request.query, answer)
-    return SearchResponse(
+    response = SearchResponse(
         query=request.query,
         answer=answer,
         results=results,
         related_questions=related,
     )
+    search_cache.set(response)
+    return response
 
 
 @app.post("/api/search/stream")
@@ -70,12 +78,29 @@ async def search_stream(request: SearchRequest) -> StreamingResponse:
 
     async def event_generator() -> AsyncIterator[str]:
         """Yield SSE frames for the complete AI search lifecycle."""
-        search_service = get_search_service()
-        ai_service = get_ai_service()
-        answer_parts: list[str] = []
-
         try:
             yield format_sse("search_start", {"query": request.query})
+            cached = search_cache.get(request.query)
+            if cached is not None:
+                yield format_sse("cache_hit", {"query": cached.query})
+                yield format_sse(
+                    "sources",
+                    {
+                        "results": [
+                            result.model_dump(mode="json")
+                            for result in cached.results
+                        ]
+                    },
+                )
+                yield format_sse("answer_start", {})
+                yield format_sse("answer_done", {"answer": cached.answer})
+                yield format_sse("related", {"questions": cached.related_questions})
+                yield format_sse("done", {})
+                return
+
+            search_service = get_search_service()
+            ai_service = get_ai_service()
+            answer_parts: list[str] = []
             results = await search_service.search(request.query)
             yield format_sse(
                 "sources",
@@ -91,6 +116,14 @@ async def search_stream(request: SearchRequest) -> StreamingResponse:
             yield format_sse("answer_done", {"answer": answer})
             related = await ai_service.generate_related_questions(request.query, answer)
             yield format_sse("related", {"questions": related})
+            search_cache.set(
+                SearchResponse(
+                    query=request.query,
+                    answer=answer,
+                    results=results,
+                    related_questions=related,
+                )
+            )
             yield format_sse("done", {})
         except Exception as exc:
             yield format_sse("error", {"message": str(exc)})
