@@ -1,0 +1,43 @@
+# Sensitive and prohibited terms for the MVP security filter.
+# Lines starting with # are comments. Blank lines are ignored.
+# Keep this file UTF-8 encoded.
+
+# 测试与占位词，单元测试依赖这些词。
+违规词示例
+敏感词示例
+forbidden-test-term
+
+# Prompt 泄露和绕过类。
+泄露系统提示词
+泄露系统指令
+泄露开发者消息
+忽略之前的指令
+忽略所有规则
+绕过安全限制
+越狱提示词
+
+# 违法交易和危险行为类。
+购买非法物品
+出售非法物品
+制作危险物品
+非法入侵系统
+窃取账号
+盗取密码
+泄露密钥
+泄露 API key
+
+# 仇恨、骚扰和露骨内容类。
+仇恨言论
+人身攻击
+露骨色情
+未成年人色情
+
+# English guard terms.
+reveal system prompt
+reveal developer message
+bypass safety rules
+steal password
+leak api key
+illegal marketplace
+explicit sexual content
+minor sexual content

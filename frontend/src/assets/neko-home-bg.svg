@@ -1,0 +1,123 @@
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="1920"
+    height="1080"
+    viewBox="0 0 1920 1080"
+    preserveAspectRatio="xMidYMid slice"
+>
+    <defs>
+        <linearGradient id="sky" x1="0" x2="1" y1="0" y2="1">
+            <stop offset="0%" stop-color="#fbfdff"/>
+            <stop offset="48%" stop-color="#f5f8ff"/>
+            <stop offset="100%" stop-color="#e9f0ff"/>
+        </linearGradient>
+        <radialGradient id="blueGlow" cx="86%" cy="35%" r="34%">
+            <stop offset="0%" stop-color="#c7d8ff" stop-opacity="0.9"/>
+            <stop offset="70%" stop-color="#eaf1ff" stop-opacity="0.45"/>
+            <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+        </radialGradient>
+        <filter id="blurLine" x="-20%" y="-80%" width="140%" height="260%">
+            <feGaussianBlur stdDeviation="6"/>
+        </filter>
+        <filter id="mascotShadow" x="-30%" y="-30%" width="160%" height="170%">
+            <feDropShadow
+                dx="0"
+                dy="18"
+                stdDeviation="22"
+                flood-color="#3f69bf"
+                flood-opacity="0.22"
+            />
+        </filter>
+    </defs>
+    <rect width="1920" height="1080" fill="url(#sky)"/>
+    <rect width="1920" height="1080" fill="url(#blueGlow)"/>
+    <path
+        d="M1160 520C1370 500 1545 505 1820 330"
+        stroke="#c9dcff"
+        stroke-width="22"
+        stroke-linecap="round"
+        opacity="0.34"
+        filter="url(#blurLine)"
+    />
+    <path
+        d="M1115 536C1375 527 1600 525 1850 360"
+        stroke="#ffffff"
+        stroke-width="20"
+        stroke-linecap="round"
+        opacity="0.88"
+    />
+    <path
+        d="M1185 548C1430 538 1618 532 1848 402"
+        stroke="#d7e6ff"
+        stroke-width="11"
+        stroke-linecap="round"
+        opacity="0.92"
+    />
+    <path
+        d="M1190 520C1385 511 1580 505 1828 348"
+        stroke="#f8fbff"
+        stroke-width="7"
+        stroke-linecap="round"
+        opacity="0.96"
+    />
+    <g transform="translate(1505 250) scale(1.12)" filter="url(#mascotShadow)">
+        <path
+            d="
+                M72 78C76 36 106 33 130 70C144 65 160 65 174 70
+                C198 33 228 36 232 78C250 94 260 117 260 144
+                C260 191 223 222 152 222C81 222 44 191 44 144
+                C44 117 54 94 72 78Z
+            "
+            fill="#ffffff"
+        />
+        <path
+            d="
+                M82 95C86 59 109 57 130 86C145 80 160 80 175 86
+                C196 57 219 59 223 95C236 107 243 124 243 145
+                C243 177 214 197 152 197C90 197 61 177 61 145
+                C61 124 69 107 82 95Z
+            "
+            fill="#161b28"
+        />
+        <path
+            d="M112 144C117 127 130 127 135 144"
+            stroke="#ffffff"
+            stroke-width="8"
+            stroke-linecap="round"
+        />
+        <path
+            d="M172 144C177 127 190 127 195 144"
+            stroke="#ffffff"
+            stroke-width="8"
+            stroke-linecap="round"
+        />
+        <path
+            d="M142 155C149 161 155 161 162 155"
+            stroke="#ffffff"
+            stroke-width="6"
+            stroke-linecap="round"
+        />
+        <ellipse cx="63" cy="217" rx="18" ry="34" fill="#eef4ff"/>
+        <ellipse cx="241" cy="217" rx="18" ry="34" fill="#eef4ff"/>
+        <path
+            d="M112 213H192V263C192 279 176 288 152 288C128 288 112 279 112 263Z"
+            fill="#f5f8ff"
+        />
+        <circle cx="152" cy="246" r="7" fill="#b6cef8"/>
+        <path
+            d="M283 82L296 113L327 126L296 139L283 170L270 139L239 126L270 113Z"
+            fill="#ffffff"
+            opacity="0.92"
+        />
+        <path
+            d="M330 34L338 52L356 60L338 68L330 86L322 68L304 60L322 52Z"
+            fill="#ffffff"
+            opacity="0.82"
+        />
+        <path
+            d="M360 122L366 136L380 142L366 148L360 162L354 148L340 142L354 136Z"
+            fill="#ffffff"
+            opacity="0.7"
+        />
+    </g>
+</svg>

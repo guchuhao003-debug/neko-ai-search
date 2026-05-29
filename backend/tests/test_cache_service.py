@@ -47,3 +47,28 @@ def test_cache_evicts_least_recently_used_item() -> None:
 
     assert cache.get("first") is None
     assert cache.get("second") is not None
+
+
+def test_cache_separates_answer_modes() -> None:
+    """Fast and deep answers should not share the same cache entry."""
+    cache = SearchResponseCache()
+    fast = _response("DeepSeek V4", "fast answer")
+    deep = _response("DeepSeek V4", "deep answer")
+    deep.mode = "deep"
+
+    cache.set(fast)
+    cache.set(deep)
+
+    assert cache.get("DeepSeek V4", "fast").answer == "fast answer"
+    assert cache.get("DeepSeek V4", "deep").answer == "deep answer"
+
+
+def test_cache_expires_stale_entries() -> None:
+    """Expired cache entries should be treated as misses."""
+    current_time = 100.0
+    cache = SearchResponseCache(ttl_seconds=10, clock=lambda: current_time)
+    cache.set(_response("DeepSeek V4"))
+
+    current_time = 111.0
+
+    assert cache.get("DeepSeek V4") is None

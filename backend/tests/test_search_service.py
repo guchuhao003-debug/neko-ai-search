@@ -3,7 +3,11 @@
 from datetime import datetime, timezone
 
 from app.schemas import SearchResult
-from app.services.search_service import rank_search_results
+from app.services.search_service import (
+    deduplicate_search_results,
+    normalize_search_payload,
+    rank_search_results,
+)
 
 
 NOW = datetime(2026, 5, 28, tzinfo=timezone.utc)
@@ -67,3 +71,54 @@ def test_rank_search_results_keeps_stable_order_for_equal_scores() -> None:
         "https://example.com/b",
     ]
     assert [result.id for result in ranked] == [1, 2]
+
+
+def test_normalize_search_payload_detects_multimodal_result_types() -> None:
+    """Tavily payload normalization should produce text, file, video, and image results."""
+    payload = {
+        "results": [
+            {
+                "title": "Documentation",
+                "url": "https://docs.example.com/guide",
+                "content": "Text source",
+                "score": 0.9,
+            },
+            {
+                "title": "White paper",
+                "url": "https://example.com/report.pdf",
+                "content": "PDF source",
+                "score": 0.88,
+            },
+            {
+                "title": "Demo video",
+                "url": "https://www.youtube.com/watch?v=demo",
+                "content": "Video source",
+                "score": 0.86,
+            },
+        ],
+        "images": [
+            {
+                "url": "https://example.com/diagram.png",
+                "description": "Architecture diagram",
+            }
+        ],
+    }
+
+    results = normalize_search_payload(payload, "架构图片和视频资料")
+
+    assert {result.type for result in results} == {"text", "file", "video", "image"}
+    assert next(result for result in results if result.type == "file").file_type == "PDF"
+    assert next(result for result in results if result.type == "image").thumbnail_url
+
+
+def test_deduplicate_search_results_keeps_highest_scored_duplicate() -> None:
+    """Duplicate URLs should collapse to the strongest result."""
+    results = [
+        _result(1, "https://example.com/page?utm=one", 0.4),
+        _result(2, "https://example.com/page?utm=two", 0.9),
+    ]
+
+    deduped = deduplicate_search_results(results)
+
+    assert len(deduped) == 1
+    assert deduped[0].score == 0.9
