@@ -72,3 +72,18 @@ def test_cache_expires_stale_entries() -> None:
     current_time = 111.0
 
     assert cache.get("DeepSeek V4") is None
+
+
+def test_cache_does_not_store_empty_result_responses() -> None:
+    """Empty search responses should not poison later cache lookups."""
+    cache = SearchResponseCache()
+    response = SearchResponse(
+        query="empty",
+        answer="No results",
+        results=[],
+        related_questions=[],
+    )
+
+    cache.set(response)
+
+    assert cache.get("empty") is None

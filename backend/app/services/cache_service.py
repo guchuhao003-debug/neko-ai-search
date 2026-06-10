@@ -40,7 +40,7 @@ class SearchResponseCache:
         if cached is None:
             return None
 
-        if cached.expires_at <= self.clock():
+        if cached.expires_at <= self.clock() or not cached.response.results:
             self._items.pop(key, None)
             return None
 
@@ -51,6 +51,10 @@ class SearchResponseCache:
     def set(self, response: SearchResponse) -> None:
         """Cache a completed search response."""
         key = build_cache_key(response.query, response.mode)
+        if not response.results:
+            self._items.pop(key, None)
+            return
+
         self._items[key] = CacheEntry(
             response=response.model_copy(deep=True),
             expires_at=self.clock() + self.ttl_seconds,

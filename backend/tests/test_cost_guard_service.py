@@ -10,6 +10,7 @@ from app.services.cost_guard_service import (
     InMemoryCostGuard,
     QuotaExceeded,
     RateLimitExceeded,
+    SQLiteCostGuard,
 )
 
 
@@ -56,3 +57,45 @@ def test_stream_concurrency_blocks_parallel_requests() -> None:
 
     guard.release_stream("127.0.0.1")
     guard.acquire_stream("127.0.0.1")
+
+
+def test_sqlite_quota_persists_across_guard_instances(tmp_path) -> None:
+    """SQLite quota counters should survive guard object recreation."""
+    settings = replace(
+        get_settings(),
+        ip_daily_external_quota=1,
+        global_daily_external_quota=3,
+    )
+    db_path = tmp_path / "cost_guard.sqlite3"
+
+    first_guard = SQLiteCostGuard(settings, str(db_path))
+    first_guard.reserve_external_quota("127.0.0.1")
+
+    second_guard = SQLiteCostGuard(settings, str(db_path))
+    with pytest.raises(QuotaExceeded):
+        second_guard.reserve_external_quota("127.0.0.1")
+
+
+def test_sqlite_rate_limit_blocks_after_minute_budget(tmp_path) -> None:
+    """SQLite rate counters should block clients within the current minute."""
+    settings = replace(get_settings(), rate_limit_per_minute=1)
+    guard = SQLiteCostGuard(settings, str(tmp_path / "cost_guard.sqlite3"))
+
+    guard.check_rate_limit("127.0.0.1")
+
+    with pytest.raises(RateLimitExceeded):
+        guard.check_rate_limit("127.0.0.1")
+
+
+def test_sqlite_active_streams_clear_on_new_process_start(tmp_path) -> None:
+    """SQLite active stream counters should not stay stuck after restart."""
+    settings = replace(get_settings(), ip_concurrent_streams=1)
+    db_path = tmp_path / "cost_guard.sqlite3"
+
+    first_guard = SQLiteCostGuard(settings, str(db_path))
+    first_guard.acquire_stream("127.0.0.1")
+    with pytest.raises(ConcurrencyLimitExceeded):
+        first_guard.acquire_stream("127.0.0.1")
+
+    second_guard = SQLiteCostGuard(settings, str(db_path))
+    second_guard.acquire_stream("127.0.0.1")

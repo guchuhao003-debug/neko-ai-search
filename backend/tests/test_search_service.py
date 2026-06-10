@@ -1,10 +1,14 @@
-"""Tests for search result ranking."""
+﻿"""Tests for search result ranking."""
 
 from datetime import datetime, timezone
+from typing import Optional
+
+import pytest
 
 from app.schemas import SearchResult
 from app.services.search_service import (
     deduplicate_search_results,
+    enrich_video_thumbnails,
     normalize_search_payload,
     rank_search_results,
 )
@@ -17,7 +21,7 @@ def _result(
     index: int,
     url: str,
     score: float,
-    published_date: str | None = None,
+    published_date: Optional[str] = None,
 ) -> SearchResult:
     """Create a search result for ranking assertions."""
     return SearchResult(
@@ -104,11 +108,98 @@ def test_normalize_search_payload_detects_multimodal_result_types() -> None:
         ],
     }
 
-    results = normalize_search_payload(payload, "架构图片和视频资料")
+    results = normalize_search_payload(payload, "architecture image and video resources")
 
     assert {result.type for result in results} == {"text", "file", "video", "image"}
     assert next(result for result in results if result.type == "file").file_type == "PDF"
     assert next(result for result in results if result.type == "image").thumbnail_url
+
+
+def test_normalize_search_payload_reads_nested_thumbnail_fields() -> None:
+    """Provider thumbnail variants should become stable preview URLs."""
+    payload = {
+        "results": [
+            {
+                "title": "Video result",
+                "url": "https://www.bilibili.com/video/BV123",
+                "content": "Video source",
+                "score": 0.82,
+                "metadata": {
+                    "open_graph": {
+                        "image": "https://example.com/video-cover.webp",
+                    },
+                },
+            },
+            {
+                "title": "Article result",
+                "url": "https://example.com/article",
+                "content": "Article source",
+                "score": 0.78,
+                "images": [
+                    {
+                        "image_url": "https://example.com/article-cover.png",
+                    }
+                ],
+            },
+        ],
+    }
+
+    results = normalize_search_payload(payload, "video and article covers")
+
+    assert next(result for result in results if result.type == "video").thumbnail_url == (
+        "https://example.com/video-cover.webp"
+    )
+    assert next(result for result in results if result.type == "text").thumbnail_url == (
+        "https://example.com/article-cover.png"
+    )
+
+
+@pytest.mark.anyio
+async def test_enrich_video_thumbnails_builds_youtube_cover() -> None:
+    """YouTube video results should receive a deterministic thumbnail URL."""
+    results = [
+        SearchResult(
+            id=1,
+            type="video",
+            title="Demo video",
+            url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            content="Video source",
+        )
+    ]
+
+    enriched = await enrich_video_thumbnails(results)
+
+    assert enriched[0].thumbnail_url == "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
+
+
+@pytest.mark.anyio
+async def test_enrich_video_thumbnails_fetches_bilibili_cover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bilibili video results should use the provider metadata cover."""
+
+    async def fake_fetch_bilibili_thumbnail(url: str) -> str:
+        """Return a deterministic Bilibili cover for the requested URL."""
+        assert url == "https://www.bilibili.com/video/BV1xx411c7mD/"
+        return "https://i0.hdslb.com/bfs/archive/cover.jpg"
+
+    monkeypatch.setattr(
+        "app.services.search_service._fetch_bilibili_thumbnail",
+        fake_fetch_bilibili_thumbnail,
+    )
+    results = [
+        SearchResult(
+            id=1,
+            type="video",
+            title="Bilibili video",
+            url="https://www.bilibili.com/video/BV1xx411c7mD/",
+            content="Video source",
+        )
+    ]
+
+    enriched = await enrich_video_thumbnails(results)
+
+    assert enriched[0].thumbnail_url == "https://i0.hdslb.com/bfs/archive/cover.jpg"
 
 
 def test_deduplicate_search_results_keeps_highest_scored_duplicate() -> None:

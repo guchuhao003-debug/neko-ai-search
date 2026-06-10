@@ -8,6 +8,8 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+import httpx
+
 from app.config import Settings
 from app.schemas import SearchResult
 
@@ -27,7 +29,34 @@ FILE_EXTENSIONS = {
     ".md",
     ".zip",
 }
-VIDEO_HOST_PARTS = ("youtube.com", "youtu.be", "bilibili.com", "vimeo.com")
+VIDEO_HOST_PARTS = ("youtube.com", "youtu.be", "bilibili.com", "b23.tv", "vimeo.com")
+BILIBILI_VIDEO_API_URL = "https://api.bilibili.com/x/web-interface/view"
+BILIBILI_REQUEST_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.bilibili.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0 Safari/537.36 NekoAISearch/1.0"
+    ),
+}
+THUMBNAIL_FIELD_NAMES = (
+    "thumbnail_url",
+    "thumbnail",
+    "image",
+    "image_url",
+    "images",
+    "poster",
+    "preview",
+    "preview_image",
+    "cover",
+    "cover_image",
+    "og:image",
+    "og_image",
+    "metadata",
+    "meta",
+    "open_graph",
+)
 
 
 class SearchConfigurationError(RuntimeError):
@@ -89,6 +118,11 @@ def normalize_search_payload(payload: Any, query: str) -> list[SearchResult]:
     results.extend(_extract_image_results(payload, len(results) + 1))
     results = deduplicate_search_results(results)
     return rank_search_results(results, query=query)
+
+
+async def enrich_video_thumbnails(results: list[SearchResult]) -> list[SearchResult]:
+    """Fill missing video covers from provider-specific metadata APIs."""
+    return await asyncio.gather(*(_enrich_video_thumbnail(result) for result in results))
 
 
 def deduplicate_search_results(results: list[SearchResult]) -> list[SearchResult]:
@@ -283,7 +317,7 @@ def _detect_result_type(url: str) -> str:
 def _file_type(url: str) -> str | None:
     """Return a compact file type label from a URL extension."""
     extension = _url_extension(url)
-    return extension.removeprefix(".").upper() if extension in FILE_EXTENSIONS else None
+    return extension[1:].upper() if extension in FILE_EXTENSIONS else None
 
 
 def _url_extension(url: str) -> str:
@@ -297,8 +331,137 @@ def _url_extension(url: str) -> str:
 
 def _thumbnail_url(raw: dict[str, Any]) -> str | None:
     """Read common thumbnail fields from a provider result."""
-    value = raw.get("thumbnail_url") or raw.get("thumbnail") or raw.get("image")
-    return str(value) if value else None
+    for field in THUMBNAIL_FIELD_NAMES:
+        candidate = _first_media_url(raw.get(field))
+        if candidate:
+            return candidate
+
+    for field in ("metadata", "meta", "open_graph"):
+        candidate = _first_media_url(raw.get(field))
+        if candidate:
+            return candidate
+
+    return None
+
+
+async def _enrich_video_thumbnail(result: SearchResult) -> SearchResult:
+    """Return one result with a provider-derived thumbnail when available."""
+    if result.type != "video" or result.thumbnail_url:
+        return result
+
+    thumbnail_url = await _provider_video_thumbnail(str(result.url))
+    if not thumbnail_url:
+        return result
+
+    return result.model_copy(update={"thumbnail_url": thumbnail_url})
+
+
+async def _provider_video_thumbnail(url: str) -> str | None:
+    """Resolve a missing thumbnail for known video providers."""
+    youtube_thumbnail = _youtube_thumbnail_url(url)
+    if youtube_thumbnail:
+        return youtube_thumbnail
+
+    if _is_bilibili_url(url):
+        return await _fetch_bilibili_thumbnail(url)
+
+    return None
+
+
+def _youtube_thumbnail_url(url: str) -> str | None:
+    """Build a YouTube thumbnail URL from common watch and short links."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+
+    hostname = parsed.hostname or ""
+    video_id = ""
+
+    if "youtube.com" in hostname:
+        query = dict(part.split("=", maxsplit=1) for part in parsed.query.split("&") if "=" in part)
+        video_id = query.get("v", "")
+    elif "youtu.be" in hostname:
+        video_id = parsed.path.strip("/").split("/", maxsplit=1)[0]
+
+    return f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+
+
+def _is_bilibili_url(url: str) -> bool:
+    """Return whether a URL points at a Bilibili video page."""
+    hostname = urlparse(url).hostname or ""
+    return hostname.endswith("bilibili.com") or hostname.endswith("b23.tv")
+
+
+async def _fetch_bilibili_thumbnail(url: str) -> str | None:
+    """Fetch a Bilibili video cover through its public video metadata API."""
+    params = _bilibili_video_params(url)
+    if not params:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
+            response = await client.get(
+                BILIBILI_VIDEO_API_URL,
+                params=params,
+                headers=BILIBILI_REQUEST_HEADERS,
+            )
+            if response.status_code >= 400:
+                return None
+
+            payload = response.json()
+    except (httpx.RequestError, ValueError):
+        return None
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    pic = data.get("pic") if isinstance(data, dict) else None
+    return _absolute_url(pic) if isinstance(pic, str) else None
+
+
+def _bilibili_video_params(url: str) -> dict[str, str] | None:
+    """Extract Bilibili bvid or aid query params from a video URL."""
+    path_parts = [part for part in unquote(urlparse(url).path).split("/") if part]
+    for part in path_parts:
+        video_id = part.split("?", maxsplit=1)[0]
+        if video_id.startswith("BV"):
+            return {"bvid": video_id}
+        if video_id.startswith("av") and video_id[2:].isdigit():
+            return {"aid": video_id[2:]}
+
+    return None
+
+
+def _absolute_url(value: str) -> str | None:
+    """Convert protocol-relative provider URLs into absolute HTTPS URLs."""
+    text = value.strip()
+    if text.startswith("//"):
+        return f"https:{text}"
+    if text.startswith(("http://", "https://")):
+        return text
+
+    return None
+
+
+def _first_media_url(value: Any) -> str | None:
+    """Find the first http image-like URL from nested provider metadata."""
+    if isinstance(value, str):
+        text = value.strip()
+        return text if text.startswith(("http://", "https://")) else None
+
+    if isinstance(value, list):
+        for item in value:
+            candidate = _first_media_url(item)
+            if candidate:
+                return candidate
+        return None
+
+    if isinstance(value, dict):
+        for field in THUMBNAIL_FIELD_NAMES:
+            candidate = _first_media_url(value.get(field))
+            if candidate:
+                return candidate
+
+    return None
 
 
 def _title_from_url(url: str, fallback: str) -> str:
@@ -331,10 +494,13 @@ class TavilySearchService:
     async def search(self, query: str) -> list[SearchResult]:
         """Search the web and return normalized results."""
         if self.settings.use_mock_ai or not self.settings.tavily_api_key:
-            return self._mock_results(query)
+            return await enrich_video_thumbnails(self._mock_results(query))
 
-        # Import lazily so unit tests can run without optional integrations loaded.
-        from langchain_tavily import TavilySearch
+        # Import lazily and keep local development usable when integrations are absent.
+        try:
+            from langchain_tavily import TavilySearch
+        except ModuleNotFoundError:
+            return self._mock_results(query)
 
         tool = TavilySearch(
             max_results=self.settings.tavily_max_results,
@@ -346,7 +512,7 @@ class TavilySearchService:
             include_image_descriptions=True,
         )
         payload = await asyncio.to_thread(tool.invoke, {"query": query})
-        return normalize_search_payload(payload, query)
+        return await enrich_video_thumbnails(normalize_search_payload(payload, query))
 
     def _mock_results(self, query: str) -> list[SearchResult]:
         """Return deterministic local results for development without API keys."""

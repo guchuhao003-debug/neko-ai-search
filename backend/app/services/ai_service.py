@@ -165,7 +165,12 @@ class DeepSeekService:
                 yield token
             return
 
-        model = self._create_model(streaming=True)
+        try:
+            model = self._create_model(streaming=True)
+        except ModuleNotFoundError:
+            async for token in self._mock_stream_answer(results):
+                yield token
+            return
         messages = [
             ("system", ANSWER_SYSTEM_PROMPT),
             (
@@ -198,7 +203,10 @@ class DeepSeekService:
         ):
             return generate_rule_based_related_questions(query)
 
-        model = self._create_model(streaming=False)
+        try:
+            model = self._create_model(streaming=False)
+        except ModuleNotFoundError:
+            return generate_rule_based_related_questions(query)
         response = await model.ainvoke(
             [
                 ("system", RELATED_SYSTEM_PROMPT),

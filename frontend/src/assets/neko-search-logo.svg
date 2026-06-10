@@ -1,0 +1,134 @@
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 1024 1024"
+    role="img"
+    aria-labelledby="title desc"
+>
+    <title id="title">Neko AI Search logo</title>
+    <desc id="desc">A yellow cat face with a magnifying glass.</desc>
+    <defs>
+        <linearGradient id="fur" x1="220" x2="760" y1="250" y2="760">
+            <stop offset="0" stop-color="#ffe15a" />
+            <stop offset="0.48" stop-color="#ffd51f" />
+            <stop offset="1" stop-color="#ffb315" />
+        </linearGradient>
+        <linearGradient id="shadowFur" x1="380" x2="760" y1="340" y2="760">
+            <stop offset="0" stop-color="#ffd832" />
+            <stop offset="1" stop-color="#f09d00" />
+        </linearGradient>
+        <linearGradient id="lens" x1="650" x2="790" y1="560" y2="720">
+            <stop offset="0" stop-color="#fffef7" />
+            <stop offset="1" stop-color="#ffe59a" />
+        </linearGradient>
+        <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+            <feDropShadow dx="0" dy="14" flood-color="#8a4b00" flood-opacity="0.18" stdDeviation="16" />
+        </filter>
+    </defs>
+
+    <g filter="url(#softShadow)">
+        <path
+            d="M292 690c-12-86-4-264 32-326 20-34 93 2 154 47 64-18 145-18 209 0 61-45 134-81 154-47 35 61 44 239 32 326-53 57-146 84-291 84s-237-27-290-84Z"
+            fill="url(#fur)"
+        />
+        <path
+            d="M333 430c8-51 53-61 96-20l-85 61c-9-12-14-26-11-41Z"
+            fill="#fff7df"
+        />
+        <path
+            d="M804 430c-8-51-53-61-96-20l85 61c9-12 14-26 11-41Z"
+            fill="#fff7df"
+        />
+
+        <path
+            d="M520 332c9 45 17 66 35 66 18 0 25-23 31-68-22-3-44-2-66 2Z"
+            fill="#db8b05"
+            opacity="0.8"
+        />
+        <path
+            d="M594 332c4 39 10 59 28 59 17 0 23-18 28-48-18-5-37-9-56-11Z"
+            fill="#db8b05"
+            opacity="0.72"
+        />
+        <path
+            d="M464 343c5 30 11 48 28 48 18 0 24-20 28-59-19 2-38 6-56 11Z"
+            fill="#db8b05"
+            opacity="0.72"
+        />
+
+        <ellipse cx="414" cy="528" fill="#fff7df" rx="62" ry="76" />
+        <ellipse cx="702" cy="528" fill="#fff7df" rx="62" ry="76" />
+        <ellipse cx="429" cy="528" fill="#57331f" rx="45" ry="59" />
+        <ellipse cx="687" cy="528" fill="#57331f" rx="45" ry="59" />
+        <circle cx="452" cy="501" r="16" fill="#fff" />
+        <circle cx="665" cy="501" r="16" fill="#fff" />
+
+        <path
+            d="M541 550c0-14 19-22 38-22s38 8 38 22c0 15-17 20-27 23v12h-22v-12c-10-3-27-8-27-23Z"
+            fill="#c06b05"
+        />
+        <path
+            d="M568 584c-12 30-48 43-78 16M590 584c12 30 48 43 78 16"
+            fill="none"
+            stroke="#8f520a"
+            stroke-linecap="round"
+            stroke-width="12"
+        />
+
+        <path
+            d="M285 548c-42-6-85 1-123 22"
+            fill="none"
+            stroke="#c97803"
+            stroke-linecap="round"
+            stroke-width="16"
+        />
+        <path
+            d="M294 582c-45 2-83 15-119 43"
+            fill="none"
+            stroke="#c97803"
+            stroke-linecap="round"
+            stroke-width="16"
+        />
+        <path
+            d="M302 619c-39 8-73 25-102 53"
+            fill="none"
+            stroke="#c97803"
+            stroke-linecap="round"
+            stroke-width="16"
+        />
+
+        <path
+            d="M461 760c-3-53-88-49-93 2"
+            fill="none"
+            stroke="#c97803"
+            stroke-linecap="round"
+            stroke-width="12"
+            opacity="0.72"
+        />
+        <path
+            d="M739 762c-4-51-90-55-94-2"
+            fill="none"
+            stroke="#c97803"
+            stroke-linecap="round"
+            stroke-width="12"
+            opacity="0.72"
+        />
+
+        <ellipse cx="358" cy="275" fill="#ffbc18" rx="30" ry="61" transform="rotate(-42 358 275)" />
+        <ellipse cx="422" cy="275" fill="#ffbc18" rx="28" ry="55" transform="rotate(-35 422 275)" />
+        <ellipse cx="713" cy="275" fill="#ffbc18" rx="28" ry="55" transform="rotate(35 713 275)" />
+        <ellipse cx="776" cy="275" fill="#ffbc18" rx="30" ry="61" transform="rotate(42 776 275)" />
+
+        <path
+            d="M774 752 677 849c-19 19-50 19-69 0s-19-50 0-69l98-97 68 69Z"
+            fill="url(#shadowFur)"
+        />
+        <circle cx="757" cy="632" r="118" fill="#f3a400" />
+        <circle cx="757" cy="632" r="89" fill="#fff3c9" />
+        <circle cx="757" cy="632" r="64" fill="url(#lens)" />
+        <path
+            d="M797 564c-1 36-22 59-58 64 36 5 57 28 58 64 5-36 27-59 64-64-37-5-59-28-64-64Z"
+            fill="#fff"
+        />
+        <rect x="710" y="652" width="28" height="28" rx="8" fill="#fff" />
+    </g>
+</svg>

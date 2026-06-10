@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
+from pydantic import HttpUrl
 
 
 SearchMode = Literal["fast", "deep"]
@@ -23,18 +24,18 @@ class SearchResult(BaseModel):
     id: int
     type: Literal["text", "image", "video", "file"] = "text"
     title: str
-    url: HttpUrl | str
+    url: Union[HttpUrl, str]
     content: str
-    score: float | None = None
-    published_date: str | None = None
-    file_type: str | None = None
-    thumbnail_url: HttpUrl | str | None = None
+    score: Optional[float] = None
+    published_date: Optional[str] = None
+    file_type: Optional[str] = None
+    thumbnail_url: Optional[Union[HttpUrl, str]] = None
 
 
 class RelatedQuestions(BaseModel):
     """Related follow-up questions generated after an answer completes."""
 
-    questions: list[str]
+    questions: List[str]
 
 
 class SearchResponse(BaseModel):
@@ -43,5 +44,50 @@ class SearchResponse(BaseModel):
     query: str
     mode: SearchMode = "fast"
     answer: str
-    results: list[SearchResult]
-    related_questions: list[str]
+    results: List[SearchResult]
+    related_questions: List[str]
+
+
+class AuthUser(BaseModel):
+    """Public authenticated user profile returned to the Vue client."""
+
+    id: int
+    email: str
+    display_name: str
+    created_at: str
+
+
+class AuthStatusResponse(BaseModel):
+    """Current authentication status for optional session checks."""
+
+    user: Optional[AuthUser] = None
+
+
+class RegisterRequest(BaseModel):
+    """Incoming user registration payload."""
+
+    email: str = Field(..., min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    password: str = Field(..., min_length=8, max_length=128)
+    display_name: str = Field(..., min_length=1, max_length=80)
+
+
+class LoginRequest(BaseModel):
+    """Incoming user login payload."""
+
+    email: str = Field(..., min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class SearchHistoryResponseItem(BaseModel):
+    """Private search history item returned to authenticated users."""
+
+    id: int
+    query: str
+    mode: SearchMode
+    created_at: str
+
+
+class SearchHistoryListResponse(BaseModel):
+    """List wrapper for private user history."""
+
+    items: List[SearchHistoryResponseItem]

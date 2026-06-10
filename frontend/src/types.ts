@@ -14,8 +14,32 @@ export interface SearchResult {
 
 export interface SearchHistoryItem {
     id: string;
+    remoteId?: number;
     query: string;
+    mode?: SearchMode;
     createdAt: string;
+}
+
+export interface AuthUser {
+    id: number;
+    email: string;
+    display_name: string;
+    created_at: string;
+}
+
+export interface AuthStatusResponse {
+    user: AuthUser | null;
+}
+
+export interface ApiSearchHistoryItem {
+    id: number;
+    query: string;
+    mode: SearchMode;
+    created_at: string;
+}
+
+export interface SearchHistoryListResponse {
+    items: ApiSearchHistoryItem[];
 }
 
 export type SearchTraceStepStatus = "running" | "success" | "error";

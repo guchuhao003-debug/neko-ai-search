@@ -1,7 +1,7 @@
 """Tests for API-level search response caching."""
 
-from collections.abc import AsyncIterator
 from dataclasses import replace
+from typing import AsyncIterator, List
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -18,7 +18,7 @@ class CountingSearchService:
         """Initialize the call counter."""
         self.calls = 0
 
-    async def search(self, query: str) -> list[SearchResult]:
+    async def search(self, query: str) -> List[SearchResult]:
         """Return deterministic search results."""
         self.calls += 1
         return [
@@ -42,7 +42,7 @@ class CountingAiService:
     async def stream_answer(
         self,
         query: str,
-        results: list[SearchResult],
+        results: List[SearchResult],
         mode: str = "fast",
     ) -> AsyncIterator[str]:
         """Yield a deterministic answer."""
@@ -54,7 +54,7 @@ class CountingAiService:
         query: str,
         answer: str,
         mode: str = "fast",
-    ) -> list[str]:
+    ) -> List[str]:
         """Return deterministic related questions."""
         self.related_calls += 1
         return [f"More about {query}"]
@@ -63,9 +63,22 @@ class CountingAiService:
 class FailingSearchService:
     """Fake search service that raises during source lookup."""
 
-    async def search(self, query: str) -> list[SearchResult]:
+    async def search(self, query: str) -> List[SearchResult]:
         """Raise a deterministic source search error."""
         raise RuntimeError(f"source failed for {query}")
+
+
+class EmptySearchService:
+    """Fake search service that returns no source results."""
+
+    def __init__(self) -> None:
+        """Initialize the call counter."""
+        self.calls = 0
+
+    async def search(self, query: str) -> List[SearchResult]:
+        """Return an empty search result set."""
+        self.calls += 1
+        return []
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +89,7 @@ def clear_search_cache() -> None:
     main.metrics.reset()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_search_once_returns_cached_response_without_repeating_ai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -99,7 +112,7 @@ async def test_search_once_returns_cached_response_without_repeating_ai(
     assert ai_service.related_calls == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_metrics_endpoint_reports_search_counters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -121,7 +134,7 @@ async def test_metrics_endpoint_reports_search_counters(
     assert 'search_trace_duration_ms_count{status="success"} 1' in metrics.text
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_search_stream_blocks_when_external_quota_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -154,7 +167,7 @@ async def test_search_stream_blocks_when_external_quota_is_exhausted(
     assert ai_service.stream_calls == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_search_stream_cached_response_does_not_consume_external_quota(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -185,7 +198,7 @@ async def test_search_stream_cached_response_does_not_consume_external_quota(
     assert ai_service.stream_calls == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_search_stream_returns_cache_hit_without_repeating_ai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -214,7 +227,33 @@ async def test_search_stream_returns_cache_hit_without_repeating_ai(
     assert ai_service.related_calls == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
+async def test_search_stream_does_not_cache_empty_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty source responses should not be cached or sent to answer generation."""
+    search_service = EmptySearchService()
+    ai_service = CountingAiService()
+    monkeypatch.setattr(main, "get_search_service", lambda: search_service)
+    monkeypatch.setattr(main, "get_ai_service", lambda: ai_service)
+
+    transport = ASGITransport(app=main.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post("/api/search/stream", json={"query": "empty topic"})
+        second = await client.post("/api/search/stream", json={"query": "empty topic"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "event: cache_hit" not in first.text
+    assert "event: cache_hit" not in second.text
+    assert '"results": []' in first.text
+    assert '"cache_write": false' in first.text
+    assert search_service.calls == 2
+    assert ai_service.stream_calls == 0
+    assert ai_service.related_calls == 0
+
+
+@pytest.mark.anyio
 async def test_search_stream_reports_failed_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -233,7 +272,7 @@ async def test_search_stream_reports_failed_step(
     assert '"search_id":' in response.text
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_search_stream_blocks_prompt_injection_before_paid_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

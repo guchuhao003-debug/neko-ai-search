@@ -34,6 +34,12 @@ class Settings:
     ai_max_source_content_chars: int
     ai_fast_answer: bool
     ai_generate_related_with_ai: bool
+    cost_guard_backend: str
+    cost_guard_sqlite_path: str
+    account_db_path: str
+    session_cookie_name: str
+    session_ttl_seconds: int
+    session_cookie_secure: bool
     rate_limit_per_minute: int
     ip_daily_external_quota: int
     global_daily_external_quota: int
@@ -79,6 +85,18 @@ def get_settings() -> Settings:
         ai_generate_related_with_ai=(
             os.getenv("AI_GENERATE_RELATED_WITH_AI", "false").lower() == "true"
         ),
+        cost_guard_backend=os.getenv("COST_GUARD_BACKEND", "sqlite"),
+        cost_guard_sqlite_path=os.getenv(
+            "COST_GUARD_SQLITE_PATH",
+            str(Path(__file__).resolve().parents[1] / "data" / "cost_guard.sqlite3"),
+        ),
+        account_db_path=os.getenv(
+            "ACCOUNT_DB_PATH",
+            str(Path(__file__).resolve().parents[1] / "data" / "accounts.sqlite3"),
+        ),
+        session_cookie_name=os.getenv("SESSION_COOKIE_NAME", "neko_session"),
+        session_ttl_seconds=int(os.getenv("SESSION_TTL_SECONDS", "604800")),
+        session_cookie_secure=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
         rate_limit_per_minute=int(os.getenv("RATE_LIMIT_PER_MINUTE", "10")),
         ip_daily_external_quota=int(os.getenv("IP_DAILY_EXTERNAL_QUOTA", "50")),
         global_daily_external_quota=int(
