@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import socket
 from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import Final
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
 
 MAX_MEDIA_BYTES: Final = 8 * 1024 * 1024
+MAX_REDIRECTS: Final = 4
 ALLOWED_SCHEMES: Final = {"http", "https"}
 BLOCKED_HOSTNAMES: Final = {"localhost", "localhost.localdomain"}
 MEDIA_TYPE_BY_EXTENSION: Final = {
@@ -20,10 +22,9 @@ MEDIA_TYPE_BY_EXTENSION: Final = {
     ".webp": "image/webp",
     ".gif": "image/gif",
     ".bmp": "image/bmp",
-    ".svg": "image/svg+xml",
 }
 MEDIA_REQUEST_HEADERS: Final = {
-    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -61,6 +62,9 @@ def validate_media_url(media_url: str) -> str:
     if _is_blocked_host(hostname):
         raise MediaProxyError(400, "Local or private media URLs cannot be proxied.")
 
+    if _url_extension(media_url) == ".svg":
+        raise MediaProxyError(415, "SVG previews are not allowed through the media proxy.")
+
     return media_url
 
 
@@ -70,7 +74,31 @@ async def fetch_remote_media(media_url: str) -> ProxiedMedia:
     timeout = httpx.Timeout(8.0, connect=3.0)
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            for _ in range(MAX_REDIRECTS + 1):
+                _ensure_public_dns_target(safe_url)
+                response = await client.send(
+                    client.build_request(
+                        "GET",
+                        safe_url,
+                        headers=media_request_headers(safe_url),
+                    ),
+                    stream=True,
+                )
+
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    await response.aclose()
+                    if not location:
+                        raise MediaProxyError(502, "Remote media redirect is missing a target.")
+                    safe_url = validate_media_url(urljoin(safe_url, location))
+                    continue
+
+                await response.aclose()
+                break
+            else:
+                raise MediaProxyError(502, "Remote media redirected too many times.")
+
             async with client.stream(
                 "GET",
                 safe_url,
@@ -133,6 +161,23 @@ def _is_blocked_host(hostname: str) -> bool:
     )
 
 
+def _ensure_public_dns_target(media_url: str) -> None:
+    """Reject URLs whose hostname resolves to private or local network addresses."""
+    hostname = urlparse(media_url).hostname or ""
+    if _is_blocked_host(hostname):
+        raise MediaProxyError(400, "Local or private media URLs cannot be proxied.")
+
+    try:
+        resolved = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return
+
+    for item in resolved:
+        address = item[4][0]
+        if _is_blocked_host(address):
+            raise MediaProxyError(400, "Local or private media URLs cannot be proxied.")
+
+
 def _response_media_type(content_type: str | None, media_url: str) -> str:
     """Resolve a usable media type from response headers or the URL extension."""
     if content_type:
@@ -144,7 +189,7 @@ def _response_media_type(content_type: str | None, media_url: str) -> str:
 
 def _ensure_allowed_media_type(media_type: str) -> None:
     """Allow image payloads and reject web pages or unknown binary downloads."""
-    if media_type.startswith("image/"):
+    if media_type.startswith("image/") and media_type != "image/svg+xml":
         return
 
     raise MediaProxyError(415, "Remote media is not an image preview.")

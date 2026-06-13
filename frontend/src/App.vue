@@ -14,9 +14,11 @@ import {
     ArrowUp,
     ArrowUpRight,
     Bolt,
+    ChevronDown,
     CheckCircle2,
     CircleAlert,
     Clock3,
+    Coins,
     FileText,
     Globe2,
     Image,
@@ -25,32 +27,48 @@ import {
     LogOut,
     Loader2,
     Moon,
+    Pencil,
     PlayCircle,
+    Plus,
+    RefreshCw,
     RotateCcw,
+    Save,
     Search,
     ShieldCheck,
     Sparkles,
     Sun,
     Trash2,
-    UserRound,
+    UserCog,
+    Users,
     X,
 } from "@lucide/vue";
 import type {
+    AdminCreditAdjustmentResponse,
+    AdminDeleteUserResponse,
+    AdminManagedUserItem,
+    AdminStatsResponse,
+    AdminUserListResponse,
     AuthStatusResponse,
     AuthUser,
+    CreditLedgerItem,
+    CreditSummaryResponse,
     SearchHistoryListResponse,
     SearchHistoryItem,
     SearchMode,
     SearchResult,
     SearchTraceStep,
     SseFrame,
+    UserRole,
+    UserStatus,
 } from "./types";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? defaultApiBaseUrl();
 const THEME_KEY = "neko-ai-search-theme";
 const GITHUB_REPO_URL = "https://github.com/guchuhao003-debug/neko-ai-search.git";
 const logoUrl = new URL("./assets/neko-search-logo.svg", import.meta.url).href;
+const terminalIconUrl = new URL("./assets/neko-search-logo.svg", import.meta.url).href;
 const officialQrUrl = new URL("./assets/neko-official-qr.jpg", import.meta.url).href;
+type AppPage = "home" | "guide" | "admin" | "adminUsers";
 
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("javascript", javascript);
@@ -83,6 +101,10 @@ const traceSteps = ref<SearchTraceStep[]>([]);
 const history = ref<SearchHistoryItem[]>([]);
 const historyLoading = ref(false);
 const currentUser = ref<AuthUser | null>(null);
+const creditSummary = ref<CreditSummaryResponse | null>(null);
+const creditLoading = ref(false);
+const creditsError = ref("");
+const isCreditsModalOpen = ref(false);
 const isAuthModalOpen = ref(false);
 const authMode = ref<"login" | "register">("login");
 const authEmail = ref("");
@@ -91,10 +113,33 @@ const authDisplayName = ref("");
 const authError = ref("");
 const authBusy = ref(false);
 const isDarkTheme = ref(loadThemePreference());
-const currentPage = ref<"home" | "guide">(loadInitialPage());
+const currentPage = ref<AppPage>(loadInitialPage());
 const failedPreviewIds = ref<Set<number>>(new Set());
 const directPreviewIds = ref<Set<number>>(new Set());
 const showAllImages = ref(false);
+const adminStats = ref<AdminStatsResponse | null>(null);
+const adminLoading = ref(false);
+const adminError = ref("");
+const isUserMenuOpen = ref(false);
+const adminUsers = ref<AdminManagedUserItem[]>([]);
+const adminUsersTotal = ref(0);
+const adminUsersLimit = ref(20);
+const adminUsersOffset = ref(0);
+const adminUserQuery = ref("");
+const adminUsersLoading = ref(false);
+const adminUsersError = ref("");
+const isAdminUserModalOpen = ref(false);
+const adminUserModalMode = ref<"create" | "edit">("create");
+const adminEditingUser = ref<AdminManagedUserItem | null>(null);
+const adminUserEmail = ref("");
+const adminUserPassword = ref("");
+const adminUserDisplayName = ref("");
+const adminUserRole = ref<UserRole>("user");
+const adminUserStatus = ref<UserStatus>("active");
+const adminCreditDelta = ref("");
+const adminCreditReason = ref("manual_grant");
+const adminUserSaving = ref(false);
+const adminUserFormError = ref("");
 const hotSearches = [
     "DeepSeek V4 有哪些能力？",
     "国产 AI 大模型有哪些？",
@@ -104,6 +149,30 @@ const hotSearches = [
 
 const hasSearched = computed(() => activeQuery.value.length > 0);
 const isAuthenticated = computed(() => currentUser.value !== null);
+const isAdmin = computed(() => currentUser.value?.is_admin === true);
+const userInitial = computed(() => {
+    const name = currentUser.value?.display_name || currentUser.value?.email || "";
+    return name.trim().slice(0, 1).toUpperCase() || "N";
+});
+const creditBalance = computed(() => creditSummary.value?.account.balance ?? null);
+const searchCreditCost = computed(() => (searchMode.value === "deep" ? 3 : 1));
+const searchCostLabel = computed(() => {
+    return searchMode.value === "deep" ? "深度搜索 3 积分" : "快速搜索 1 积分";
+});
+const compactSearchCostLabel = computed(() => `${searchCreditCost.value} 积分`);
+const searchCostBalanceLabel = computed(() => {
+    if (!currentUser.value) {
+        return "需登录";
+    }
+    if (creditBalance.value === null) {
+        return "同步中";
+    }
+    return `${creditBalance.value} 可用`;
+});
+const isSelectedModeUnaffordable = computed(() => {
+    return creditBalance.value !== null && creditBalance.value < searchCreditCost.value;
+});
+const creditLedger = computed(() => creditSummary.value?.ledger ?? []);
 const historyScopeLabel = computed(() => (isAuthenticated.value ? "云端私有历史" : "用户级后端历史"));
 const historyHint = computed(() => {
     return isAuthenticated.value
@@ -122,7 +191,80 @@ const visibleImageResults = computed(() => {
         ? standaloneImageResults.value
         : standaloneImageResults.value.slice(0, 4);
 });
+const adminSummaryCards = computed(() => {
+    if (!adminStats.value) {
+        return [];
+    }
 
+    const summary = adminStats.value.summary;
+    return [
+        {
+            label: "注册用户",
+            value: formatNumber(summary.total_users),
+            detail: `今日新增 ${formatNumber(summary.registered_today)}`,
+        },
+        {
+            label: "活跃会话",
+            value: formatNumber(summary.active_sessions),
+            detail: "当前有效 Session",
+        },
+        {
+            label: "积分余额池",
+            value: formatNumber(summary.total_credit_balance),
+            detail: `累计发放 ${formatNumber(summary.total_credits_granted)}`,
+        },
+        {
+            label: "搜索消耗",
+            value: formatNumber(summary.total_credits_spent),
+            detail: `今日消耗 ${formatNumber(summary.credits_spent_today)}`,
+        },
+    ];
+});
+const adminUsersPage = computed(() => {
+    return Math.floor(adminUsersOffset.value / adminUsersLimit.value) + 1;
+});
+const adminUsersPageCount = computed(() => {
+    return Math.max(1, Math.ceil(adminUsersTotal.value / adminUsersLimit.value));
+});
+const canLoadPreviousAdminUsers = computed(() => adminUsersOffset.value > 0);
+const canLoadNextAdminUsers = computed(() => {
+    return adminUsersOffset.value + adminUsersLimit.value < adminUsersTotal.value;
+});
+const adminUserModalTitle = computed(() => {
+    return adminUserModalMode.value === "create" ? "创建用户" : "编辑用户";
+});
+const currentUserRoleLabel = computed(() => {
+    if (!currentUser.value) {
+        return "未登录";
+    }
+    return currentUser.value.is_admin ? "管理员账号" : "普通用户";
+});
+
+
+/**
+ * Build a local API URL that keeps cookies on the same host as the opened page.
+ */
+function defaultApiBaseUrl(): string {
+    const protocol = window.location.protocol || "http:";
+    const hostname = window.location.hostname || "127.0.0.1";
+    return `${protocol}//${hostname}:8000`;
+}
+
+/**
+ * Normalize backend auth users so older running responses remain compatible.
+ */
+function normalizeAuthUser(user: AuthUser | null): AuthUser | null {
+    if (!user) {
+        return null;
+    }
+
+    return {
+        ...user,
+        role: user.role ?? "user",
+        status: user.status ?? "active",
+        is_admin: user.is_admin === true,
+    };
+}
 
 /**
  * Normalize backend history items for the shared sidebar renderer.
@@ -198,9 +340,15 @@ async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T
 async function refreshAuthStatus(): Promise<void> {
     try {
         const status = await apiRequest<AuthStatusResponse>("/api/auth/me");
-        currentUser.value = status.user;
-        if (status.user) {
-            await loadRemoteHistory();
+        currentUser.value = normalizeAuthUser(status.user);
+        if (currentUser.value) {
+            await Promise.all([loadRemoteHistory(), loadCreditSummary()]);
+            if (currentUser.value.is_admin && currentPage.value === "admin") {
+                await loadAdminStats();
+            }
+            if (currentUser.value.is_admin && currentPage.value === "adminUsers") {
+                await loadAdminUsers();
+            }
             return;
         }
     } catch {
@@ -208,6 +356,9 @@ async function refreshAuthStatus(): Promise<void> {
     }
 
     history.value = [];
+    creditSummary.value = null;
+    adminStats.value = null;
+    adminUsers.value = [];
 }
 
 /**
@@ -230,6 +381,414 @@ async function loadRemoteHistory(): Promise<void> {
     } finally {
         historyLoading.value = false;
     }
+}
+
+/**
+ * Load the current user's credit balance and recent ledger rows.
+ */
+async function loadCreditSummary(): Promise<void> {
+    if (!currentUser.value) {
+        return;
+    }
+
+    creditLoading.value = true;
+    creditsError.value = "";
+    try {
+        creditSummary.value = await apiRequest<CreditSummaryResponse>("/api/credits");
+    } catch (error) {
+        if (error instanceof ApiRequestError && error.status === 401) {
+            currentUser.value = null;
+            history.value = [];
+            creditSummary.value = null;
+            return;
+        }
+        creditsError.value = error instanceof Error ? error.message : "积分账户加载失败";
+    } finally {
+        creditLoading.value = false;
+    }
+}
+
+/**
+ * Load administrator-only platform statistics.
+ */
+async function loadAdminStats(): Promise<void> {
+    adminError.value = "";
+    if (!currentUser.value) {
+        adminError.value = "请先登录管理员账号。";
+        adminStats.value = null;
+        return;
+    }
+    if (!currentUser.value.is_admin) {
+        adminError.value = "当前账号没有后台统计权限。";
+        adminStats.value = null;
+        return;
+    }
+
+    adminLoading.value = true;
+    try {
+        adminStats.value = await apiRequest<AdminStatsResponse>("/api/admin/stats");
+    } catch (error) {
+        adminStats.value = null;
+        if (error instanceof ApiRequestError && error.status === 401) {
+            currentUser.value = null;
+            history.value = [];
+            creditSummary.value = null;
+            openAuthModal("login");
+        }
+        adminError.value = error instanceof Error ? error.message : "后台统计加载失败";
+    } finally {
+        adminLoading.value = false;
+    }
+}
+
+/**
+ * Load administrator-only users with pagination and search filters.
+ */
+async function loadAdminUsers(resetOffset = false): Promise<void> {
+    adminUsersError.value = "";
+    if (resetOffset) {
+        adminUsersOffset.value = 0;
+    }
+    if (!currentUser.value) {
+        adminUsersError.value = "请先登录管理员账号。";
+        adminUsers.value = [];
+        adminUsersTotal.value = 0;
+        return;
+    }
+    if (!currentUser.value.is_admin) {
+        adminUsersError.value = "当前账号没有用户管理权限。";
+        adminUsers.value = [];
+        adminUsersTotal.value = 0;
+        return;
+    }
+
+    const params = new URLSearchParams({
+        query: adminUserQuery.value.trim(),
+        limit: String(adminUsersLimit.value),
+        offset: String(adminUsersOffset.value),
+    });
+
+    adminUsersLoading.value = true;
+    try {
+        const response = await apiRequest<AdminUserListResponse>(
+            `/api/admin/users?${params.toString()}`,
+        );
+        adminUsers.value = response.items;
+        adminUsersTotal.value = response.total;
+        adminUsersLimit.value = response.limit;
+        adminUsersOffset.value = response.offset;
+    } catch (error) {
+        adminUsers.value = [];
+        adminUsersTotal.value = 0;
+        if (error instanceof ApiRequestError && error.status === 401) {
+            currentUser.value = null;
+            history.value = [];
+            creditSummary.value = null;
+            openAuthModal("login");
+        }
+        adminUsersError.value = error instanceof Error ? error.message : "用户列表加载失败";
+    } finally {
+        adminUsersLoading.value = false;
+    }
+}
+
+/**
+ * Reset the administrator user search to the first page.
+ */
+function searchAdminUsers(): void {
+    void loadAdminUsers(true);
+}
+
+/**
+ * Move one page backward in the administrator user list.
+ */
+function loadPreviousAdminUsers(): void {
+    if (!canLoadPreviousAdminUsers.value) {
+        return;
+    }
+    adminUsersOffset.value = Math.max(0, adminUsersOffset.value - adminUsersLimit.value);
+    void loadAdminUsers();
+}
+
+/**
+ * Move one page forward in the administrator user list.
+ */
+function loadNextAdminUsers(): void {
+    if (!canLoadNextAdminUsers.value) {
+        return;
+    }
+    adminUsersOffset.value += adminUsersLimit.value;
+    void loadAdminUsers();
+}
+
+/**
+ * Open the credit account modal and refresh the latest ledger.
+ */
+function openCreditsModal(): void {
+    closeUserMenu();
+    isCreditsModalOpen.value = true;
+    void loadCreditSummary();
+}
+
+/**
+ * Close the credit account modal.
+ */
+function closeCreditsModal(): void {
+    isCreditsModalOpen.value = false;
+}
+
+/**
+ * Toggle the authenticated user's compact dropdown menu.
+ */
+function toggleUserMenu(): void {
+    isUserMenuOpen.value = !isUserMenuOpen.value;
+}
+
+/**
+ * Close the authenticated user's compact dropdown menu.
+ */
+function closeUserMenu(): void {
+    isUserMenuOpen.value = false;
+}
+
+/**
+ * Prepare the administrator modal for creating a user.
+ */
+function openCreateAdminUserModal(): void {
+    adminUserModalMode.value = "create";
+    adminEditingUser.value = null;
+    adminUserEmail.value = "";
+    adminUserPassword.value = "";
+    adminUserDisplayName.value = "";
+    adminUserRole.value = "user";
+    adminUserStatus.value = "active";
+    adminCreditDelta.value = "";
+    adminCreditReason.value = "manual_grant";
+    adminUserFormError.value = "";
+    isAdminUserModalOpen.value = true;
+}
+
+/**
+ * Prepare the administrator modal for editing one user.
+ */
+function openEditAdminUserModal(user: AdminManagedUserItem): void {
+    adminUserModalMode.value = "edit";
+    adminEditingUser.value = user;
+    adminUserEmail.value = user.email;
+    adminUserPassword.value = "";
+    adminUserDisplayName.value = user.display_name;
+    adminUserRole.value = user.role;
+    adminUserStatus.value = user.status;
+    adminCreditDelta.value = "";
+    adminCreditReason.value = "manual_grant";
+    adminUserFormError.value = "";
+    isAdminUserModalOpen.value = true;
+}
+
+/**
+ * Close the administrator user modal when no save request is running.
+ */
+function closeAdminUserModal(): void {
+    if (adminUserSaving.value) {
+        return;
+    }
+
+    isAdminUserModalOpen.value = false;
+    adminUserFormError.value = "";
+}
+
+/**
+ * Parse an optional credit delta from the administrator edit form.
+ */
+function parseAdminCreditDelta(): number {
+    const rawValue = adminCreditDelta.value.trim();
+    if (!rawValue) {
+        return 0;
+    }
+
+    const amount = Number(rawValue);
+    if (!Number.isInteger(amount)) {
+        throw new Error("积分调整必须是整数");
+    }
+    return amount;
+}
+
+/**
+ * Create or update a managed user, then optionally append a credit adjustment.
+ */
+async function submitAdminUserForm(): Promise<void> {
+    if (adminUserSaving.value) {
+        return;
+    }
+
+    adminUserSaving.value = true;
+    adminUserFormError.value = "";
+    try {
+        if (adminUserModalMode.value === "create") {
+            await apiRequest<AdminManagedUserItem>("/api/admin/users", {
+                method: "POST",
+                body: JSON.stringify({
+                    email: adminUserEmail.value.trim(),
+                    password: adminUserPassword.value,
+                    display_name: adminUserDisplayName.value.trim(),
+                    role: adminUserRole.value,
+                    status: adminUserStatus.value,
+                }),
+            });
+        } else if (adminEditingUser.value) {
+            const creditDelta = parseAdminCreditDelta();
+            await apiRequest<AdminManagedUserItem>(
+                `/api/admin/users/${adminEditingUser.value.id}`,
+                {
+                    method: "PATCH",
+                    body: JSON.stringify({
+                        display_name: adminUserDisplayName.value.trim(),
+                        role: adminUserRole.value,
+                        status: adminUserStatus.value,
+                    }),
+                },
+            );
+
+            if (creditDelta !== 0) {
+                await apiRequest<AdminCreditAdjustmentResponse>(
+                    `/api/admin/users/${adminEditingUser.value.id}/credits`,
+                    {
+                        method: "POST",
+                        body: JSON.stringify({
+                            change_amount: creditDelta,
+                            reason: adminCreditReason.value.trim() || "manual_grant",
+                        }),
+                    },
+                );
+            }
+        }
+
+        isAdminUserModalOpen.value = false;
+        await loadAdminUsers();
+        if (adminStats.value) {
+            void loadAdminStats();
+        }
+    } catch (error) {
+        adminUserFormError.value = error instanceof Error ? error.message : "保存用户失败";
+    } finally {
+        adminUserSaving.value = false;
+    }
+}
+
+/**
+ * Delete a managed user after a browser-level confirmation.
+ */
+async function deleteAdminUser(user: AdminManagedUserItem): Promise<void> {
+    if (currentUser.value?.id === user.id) {
+        adminUsersError.value = "管理员不能删除自己的账号。";
+        return;
+    }
+    const confirmed = window.confirm(`确认删除用户 ${maskedEmail(user.email)} 吗？`);
+    if (!confirmed) {
+        return;
+    }
+
+    adminUsersLoading.value = true;
+    adminUsersError.value = "";
+    try {
+        await apiRequest<AdminDeleteUserResponse>(`/api/admin/users/${user.id}`, {
+            method: "DELETE",
+        });
+        if (
+            adminUsers.value.length === 1
+            && adminUsersOffset.value >= adminUsersLimit.value
+        ) {
+            adminUsersOffset.value -= adminUsersLimit.value;
+        }
+        await loadAdminUsers();
+        if (adminStats.value) {
+            void loadAdminStats();
+        }
+    } catch (error) {
+        adminUsersError.value = error instanceof Error ? error.message : "删除用户失败";
+    } finally {
+        adminUsersLoading.value = false;
+    }
+}
+
+/**
+ * Convert credit ledger reason codes into concise user-facing labels.
+ */
+function creditReasonLabel(reason: string): string {
+    const labels: Record<string, string> = {
+        registration_bonus: "注册赠送",
+        search_usage: "搜索消耗",
+        manual_grant: "人工发放",
+        manual_debit: "人工扣减",
+        manual_test_debit: "测试扣减",
+    };
+    return labels[reason] ?? reason;
+}
+
+/**
+ * Display partially masked emails in administrator tables.
+ */
+function maskedEmail(email: string): string {
+    const [name = "", domain = ""] = email.split("@");
+    if (!domain) {
+        return email;
+    }
+    const visibleName = name.length <= 2 ? name.slice(0, 1) : `${name.slice(0, 2)}***`;
+    return `${visibleName}@${domain}`;
+}
+
+/**
+ * Convert stored user roles into compact labels.
+ */
+function userRoleLabel(role: string): string {
+    return role === "admin" ? "管理员" : "普通用户";
+}
+
+/**
+ * Convert stored user statuses into compact labels.
+ */
+function userStatusLabel(status: string): string {
+    return status === "disabled" ? "已禁用" : "正常";
+}
+
+/**
+ * Format a credit delta with an explicit sign.
+ */
+function formatCreditDelta(item: CreditLedgerItem): string {
+    return item.change_amount > 0
+        ? `+${item.change_amount}`
+        : String(item.change_amount);
+}
+
+/**
+ * Format large integer counters for compact dashboard cards.
+ */
+function formatNumber(value: number): string {
+    return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+/**
+ * Format signed credit totals in grouped administrator rows.
+ */
+function formatSignedNumber(value: number): string {
+    return value > 0 ? `+${formatNumber(value)}` : formatNumber(value);
+}
+
+/**
+ * Format backend timestamps into a short local display string.
+ */
+function formatShortDate(value: string): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return value;
+    }
+
+    return new Intl.DateTimeFormat("zh-CN", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+    }).format(date);
 }
 
 /**
@@ -286,12 +845,18 @@ async function submitAuthForm(): Promise<void> {
             method: "POST",
             body: JSON.stringify(payload),
         });
-        currentUser.value = response.user;
+        currentUser.value = normalizeAuthUser(response.user);
         isAuthModalOpen.value = false;
         authPassword.value = "";
         authError.value = "";
-        if (response.user) {
-            await loadRemoteHistory();
+        if (currentUser.value) {
+            await Promise.all([loadRemoteHistory(), loadCreditSummary()]);
+            if (currentUser.value.is_admin && currentPage.value === "admin") {
+                await loadAdminStats();
+            }
+            if (currentUser.value.is_admin && currentPage.value === "adminUsers") {
+                await loadAdminUsers();
+            }
         }
     } catch (error) {
         authError.value = error instanceof Error ? error.message : "认证失败，请稍后重试";
@@ -309,6 +874,14 @@ async function logout(): Promise<void> {
     } finally {
         currentUser.value = null;
         history.value = [];
+        creditSummary.value = null;
+        adminStats.value = null;
+        adminUsers.value = [];
+        isCreditsModalOpen.value = false;
+        closeUserMenu();
+        if (currentPage.value === "admin" || currentPage.value === "adminUsers") {
+            showHomePage();
+        }
     }
 }
 
@@ -334,8 +907,17 @@ function loadThemePreference(): boolean {
 /**
  * Read the initial lightweight page state from the current hash.
  */
-function loadInitialPage(): "home" | "guide" {
-    return window.location.hash === "#guide" ? "guide" : "home";
+function loadInitialPage(): AppPage {
+    if (window.location.hash === "#guide") {
+        return "guide";
+    }
+    if (window.location.hash === "#admin") {
+        return "admin";
+    }
+    if (window.location.hash === "#admin-users") {
+        return "adminUsers";
+    }
+    return "home";
 }
 
 /**
@@ -343,6 +925,12 @@ function loadInitialPage(): "home" | "guide" {
  */
 function syncPageFromHash(): void {
     currentPage.value = loadInitialPage();
+    if (currentPage.value === "admin") {
+        void loadAdminStats();
+    }
+    if (currentPage.value === "adminUsers") {
+        void loadAdminUsers();
+    }
 }
 
 /**
@@ -352,9 +940,52 @@ function showGuidePage(): void {
     activeQuery.value = "";
     answer.value = "";
     errorMessage.value = "";
+    adminError.value = "";
+    adminUsersError.value = "";
+    closeUserMenu();
     currentPage.value = "guide";
     window.history.pushState(null, "", "#guide");
     window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+/**
+ * Navigate to the administrator statistics page.
+ */
+function showAdminPage(): void {
+    activeQuery.value = "";
+    answer.value = "";
+    errorMessage.value = "";
+    adminUsersError.value = "";
+    closeUserMenu();
+    currentPage.value = "admin";
+    window.history.pushState(null, "", "#admin");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (!currentUser.value) {
+        openAuthModal("login");
+        adminError.value = "请先登录管理员账号。";
+        return;
+    }
+    void loadAdminStats();
+}
+
+/**
+ * Navigate to the administrator user-management page.
+ */
+function showAdminUsersPage(): void {
+    activeQuery.value = "";
+    answer.value = "";
+    errorMessage.value = "";
+    adminError.value = "";
+    closeUserMenu();
+    currentPage.value = "adminUsers";
+    window.history.pushState(null, "", "#admin-users");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (!currentUser.value) {
+        openAuthModal("login");
+        adminUsersError.value = "请先登录管理员账号。";
+        return;
+    }
+    void loadAdminUsers(true);
 }
 
 /**
@@ -364,6 +995,9 @@ function showHomePage(): void {
     activeQuery.value = "";
     answer.value = "";
     errorMessage.value = "";
+    adminError.value = "";
+    adminUsersError.value = "";
+    closeUserMenu();
     currentPage.value = "home";
     window.history.pushState(null, "", window.location.pathname + window.location.search);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -428,6 +1062,47 @@ async function clearCurrentHistory(): Promise<void> {
 
     history.value = [];
 }
+
+/**
+ * Update the visible credit balance after a successful search debit event.
+ */
+function updateCreditBalance(balance: number): void {
+    if (!creditSummary.value) {
+        return;
+    }
+
+    creditSummary.value = {
+        ...creditSummary.value,
+        account: {
+            ...creditSummary.value.account,
+            balance,
+        },
+    };
+}
+
+/**
+ * Stop searches that cannot pass the authenticated credit gate.
+ */
+function ensureSearchAllowed(): boolean {
+    if (!currentUser.value) {
+        errorMessage.value = "请先登录后再使用积分搜索。";
+        openAuthModal("login");
+        authError.value = "登录后即可使用积分搜索，并保存你的私有历史记录。";
+        return false;
+    }
+
+    if (isSelectedModeUnaffordable.value) {
+        errorMessage.value = (
+            `当前模式需要 ${searchCreditCost.value} 积分，` +
+            `你的余额为 ${creditBalance.value} 积分。`
+        );
+        openCreditsModal();
+        return false;
+    }
+
+    return true;
+}
+
 /**
  * Submit a search request and consume backend SSE frames.
  */
@@ -449,6 +1124,11 @@ async function submitSearch(nextQuery = query.value): Promise<void> {
     failedPreviewIds.value = new Set();
     directPreviewIds.value = new Set();
     showAllImages.value = false;
+
+    if (!ensureSearchAllowed()) {
+        return;
+    }
+
     isSearching.value = true;
     if (currentUser.value) {
         upsertVisibleHistory(trimmed);
@@ -477,7 +1157,7 @@ async function submitSearch(nextQuery = query.value): Promise<void> {
     } finally {
         isSearching.value = false;
         if (currentUser.value) {
-            void loadRemoteHistory();
+            void Promise.all([loadRemoteHistory(), loadCreditSummary()]);
         }
     }
 }
@@ -552,6 +1232,9 @@ function handleSseFrame(frame: SseFrame): void {
 
     if (frame.event === "step_done") {
         upsertTraceStep(data, "success");
+        if (data.step === "credit_debit" && typeof data.balance_after === "number") {
+            updateCreditBalance(data.balance_after);
+        }
     }
 
     if (frame.event === "step_error") {
@@ -573,6 +1256,15 @@ function handleSseFrame(frame: SseFrame): void {
     if (frame.event === "error" && typeof data.message === "string") {
         const trace = typeof data.search_id === "string" ? `（搜索 ID：${data.search_id}）` : "";
         errorMessage.value = `${data.message}${trace}`;
+        if (data.code === "authentication_required") {
+            currentUser.value = null;
+            creditSummary.value = null;
+            openAuthModal("login");
+            authError.value = "登录状态已失效，请重新登录后继续搜索。";
+        }
+        if (data.code === "insufficient_credits") {
+            openCreditsModal();
+        }
     }
 }
 
@@ -612,7 +1304,9 @@ function traceStepLabel(name: string): string {
         security_check: "安全策略检查",
         stream_concurrency: "并发连接检查",
         cache_lookup: "缓存检查",
+        credit_check: "积分余额检查",
         external_quota: "外部调用配额检查",
+        credit_debit: "积分扣减",
         source_search: "来源搜索与排序",
         ai_answer_stream: "AI 回答生成",
         related_questions: "相关问题生成",
@@ -650,17 +1344,123 @@ function renderAnswerMarkdown(text: string, results: SearchResult[]): string {
     const sourceUrls = new Map(results.map((result) => [result.id, result.url]));
     const markdown = text.replace(/\[(\d+)]/g, (raw, idText: string) => {
         const url = sourceUrls.get(Number(idText));
-        return url ? `[[${idText}]](${url})` : raw;
+        return url && isSafeHttpUrl(url) ? `[[${idText}]](${url})` : raw;
     });
 
-    return String(marked.parse(markdown || ""));
+    return sanitizeMarkdownHtml(String(marked.parse(markdown || "")));
+}
+
+/**
+ * Remove unsafe HTML from rendered Markdown before binding it with v-html.
+ */
+function sanitizeMarkdownHtml(html: string): string {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    sanitizeNode(template.content);
+    return template.innerHTML;
+}
+
+/**
+ * Recursively apply a small allowlist that preserves Markdown formatting.
+ */
+function sanitizeNode(root: ParentNode): void {
+    const allowedTags = new Set([
+        "A",
+        "BLOCKQUOTE",
+        "BR",
+        "CODE",
+        "EM",
+        "H1",
+        "H2",
+        "H3",
+        "H4",
+        "H5",
+        "H6",
+        "HR",
+        "LI",
+        "OL",
+        "P",
+        "PRE",
+        "STRONG",
+        "TABLE",
+        "TBODY",
+        "TD",
+        "TH",
+        "THEAD",
+        "TR",
+        "UL",
+    ]);
+    const allowedAttributes: Record<string, Set<string>> = {
+        A: new Set(["href", "title", "target", "rel"]),
+        CODE: new Set(["class"]),
+        TH: new Set(["align"]),
+        TD: new Set(["align"]),
+    };
+
+    for (const node of Array.from(root.childNodes)) {
+        if (node.nodeType === Node.COMMENT_NODE) {
+            node.remove();
+            continue;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            continue;
+        }
+
+        const element = node as HTMLElement;
+        if (!allowedTags.has(element.tagName)) {
+            element.replaceWith(...Array.from(element.childNodes));
+            sanitizeNode(root);
+            continue;
+        }
+
+        for (const attribute of Array.from(element.attributes)) {
+            const allowed = allowedAttributes[element.tagName]?.has(attribute.name) ?? false;
+            if (!allowed || attribute.name.toLowerCase().startsWith("on")) {
+                element.removeAttribute(attribute.name);
+            }
+        }
+
+        if (element.tagName === "A") {
+            sanitizeAnchor(element as HTMLAnchorElement);
+        }
+        sanitizeNode(element);
+    }
+}
+
+/**
+ * Keep Markdown links navigable without allowing script-style URLs.
+ */
+function sanitizeAnchor(anchor: HTMLAnchorElement): void {
+    if (!isSafeHttpUrl(anchor.getAttribute("href") ?? "")) {
+        anchor.removeAttribute("href");
+        anchor.removeAttribute("target");
+        anchor.removeAttribute("rel");
+        return;
+    }
+
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+}
+
+/**
+ * Return whether a URL can be safely opened by the browser.
+ */
+function isSafeHttpUrl(url: string): boolean {
+    try {
+        const parsed = new URL(url, window.location.origin);
+        return parsed.protocol === "http:" || parsed.protocol === "https:";
+    } catch {
+        return false;
+    }
 }
 
 /**
  * Navigate to an original source in the current browser tab.
  */
 function openExternal(url: string): void {
-    window.location.href = url;
+    if (isSafeHttpUrl(url)) {
+        window.location.href = url;
+    }
 }
 
 /**
@@ -799,10 +1599,14 @@ function previewUrl(result: SearchResult): string {
 <template>
     <main
         :class="[
-            'app-shell',
+                'app-shell',
             {
                 'is-results': hasSearched,
                 'is-guide': currentPage === 'guide' && !hasSearched,
+                'is-admin': (
+                    (currentPage === 'admin' || currentPage === 'adminUsers')
+                    && !hasSearched
+                ),
                 'is-dark': isDarkTheme,
             },
         ]"
@@ -834,26 +1638,66 @@ function previewUrl(result: SearchResult): string {
                         <Sun v-if="isDarkTheme" :size="18" />
                         <Moon v-else :size="18" />
                     </button>
-                    <button
-                        v-if="currentUser"
-                        class="auth-action is-signed"
-                        type="button"
-                        title="刷新云端历史"
-                        @click="loadRemoteHistory"
-                    >
-                        <UserRound :size="16" />
-                        <span>{{ currentUser.display_name }}</span>
-                    </button>
-                    <button
-                        v-if="currentUser"
-                        class="icon-button"
-                        type="button"
-                        aria-label="退出登录"
-                        title="退出登录"
-                        @click="logout"
-                    >
-                        <LogOut :size="17" />
-                    </button>
+                    <div v-if="currentUser" class="user-menu">
+                        <button
+                            class="auth-action is-signed"
+                            type="button"
+                            :aria-expanded="isUserMenuOpen"
+                            aria-haspopup="menu"
+                            @click="toggleUserMenu"
+                        >
+                            <span class="user-avatar" aria-hidden="true">{{ userInitial }}</span>
+                            <span class="user-display">{{ currentUser.display_name }}</span>
+                            <ChevronDown :size="15" aria-hidden="true" />
+                        </button>
+                        <div v-if="isUserMenuOpen" class="user-dropdown" role="menu">
+                            <div class="user-menu-card">
+                                <span class="user-avatar" aria-hidden="true">
+                                    {{ userInitial }}
+                                </span>
+                                <div>
+                                    <strong>{{ currentUser.display_name }}</strong>
+                                    <small>{{ currentUser.email }}</small>
+                                </div>
+                                <em>{{ currentUserRoleLabel }}</em>
+                            </div>
+                            <button type="button" role="menuitem" @click="openCreditsModal">
+                                <Coins :size="16" />
+                                <span>积分账户</span>
+                                <strong>{{ creditBalance === null ? "--" : creditBalance }}</strong>
+                            </button>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                @click="loadRemoteHistory(); closeUserMenu()"
+                            >
+                                <RefreshCw :size="16" />
+                                <span>同步历史</span>
+                            </button>
+                            <button
+                                v-if="isAdmin"
+                                type="button"
+                                role="menuitem"
+                                @click="showAdminUsersPage"
+                            >
+                                <Users :size="16" />
+                                <span>用户管理</span>
+                            </button>
+                            <button
+                                v-if="isAdmin"
+                                type="button"
+                                role="menuitem"
+                                @click="showAdminPage"
+                            >
+                                <ShieldCheck :size="16" />
+                                <span>后台统计</span>
+                            </button>
+                            <button type="button" role="menuitem" @click="logout">
+                                <LogOut :size="16" />
+                                <span>退出登录</span>
+                            </button>
+                        </div>
+                    </div>
                     <button
                         v-else
                         class="auth-action"
@@ -930,6 +1774,7 @@ function previewUrl(result: SearchResult): string {
                                     <button
                                         type="button"
                                         :class="{ 'is-active': searchMode === 'fast' }"
+                                        title="快速搜索消耗 1 积分"
                                         @click="searchMode = 'fast'"
                                     >
                                         快速
@@ -937,10 +1782,23 @@ function previewUrl(result: SearchResult): string {
                                     <button
                                         type="button"
                                         :class="{ 'is-active': searchMode === 'deep' }"
+                                        title="深度搜索消耗 3 积分"
                                         @click="searchMode = 'deep'"
                                     >
                                         深度
                                     </button>
+                                </div>
+                                <div
+                                    :class="[
+                                        'search-cost-pill',
+                                        { 'is-low': isSelectedModeUnaffordable },
+                                    ]"
+                                    aria-label="当前搜索积分成本"
+                                    :title="searchCostLabel"
+                                >
+                                    <Bolt :size="14" aria-hidden="true" />
+                                    <span>{{ searchCostLabel }}</span>
+                                    <strong>{{ searchCostBalanceLabel }}</strong>
                                 </div>
                                 <button
                                     class="submit-button"
@@ -1021,7 +1879,7 @@ function previewUrl(result: SearchResult): string {
                             <div class="terminal-body">
                                 <div class="demo-card-header">
                                     <span class="demo-mark">
-                                        <img :src="logoUrl" alt="" />
+                                        <img :src="terminalIconUrl" alt="" />
                                     </span>
                                     <strong>Neko AI Search</strong>
                                 </div>
@@ -1065,6 +1923,24 @@ function previewUrl(result: SearchResult): string {
                     </div>
                 </section>
             </div>
+
+            <footer class="home-footnote" aria-label="平台脚注信息">
+                <div class="footnote-brand">
+                    <img :src="logoUrl" alt="" />
+                    <span>Neko AI Search</span>
+                </div>
+                <p>
+                    AI 搜索结果基于公开网页检索与模型生成，仅供参考；重要结论请结合引用来源二次核验。
+                </p>
+                <div class="footnote-links" aria-label="平台说明链接">
+                    <span>登录后可保留个人历史记录与积分账户</span>
+                    <a :href="GITHUB_REPO_URL" target="_blank" rel="noreferrer">
+                        GitHub
+                        <ArrowUpRight :size="13" aria-hidden="true" />
+                    </a>
+                    <span>© 2026 Neko AI Search</span>
+                </div>
+            </footer>
         </section>
 
         <section
@@ -1093,26 +1969,66 @@ function previewUrl(result: SearchResult): string {
                         <Sun v-if="isDarkTheme" :size="18" />
                         <Moon v-else :size="18" />
                     </button>
-                    <button
-                        v-if="currentUser"
-                        class="auth-action is-signed"
-                        type="button"
-                        title="刷新云端历史"
-                        @click="loadRemoteHistory"
-                    >
-                        <UserRound :size="16" />
-                        <span>{{ currentUser.display_name }}</span>
-                    </button>
-                    <button
-                        v-if="currentUser"
-                        class="icon-button"
-                        type="button"
-                        aria-label="退出登录"
-                        title="退出登录"
-                        @click="logout"
-                    >
-                        <LogOut :size="17" />
-                    </button>
+                    <div v-if="currentUser" class="user-menu">
+                        <button
+                            class="auth-action is-signed"
+                            type="button"
+                            :aria-expanded="isUserMenuOpen"
+                            aria-haspopup="menu"
+                            @click="toggleUserMenu"
+                        >
+                            <span class="user-avatar" aria-hidden="true">{{ userInitial }}</span>
+                            <span class="user-display">{{ currentUser.display_name }}</span>
+                            <ChevronDown :size="15" aria-hidden="true" />
+                        </button>
+                        <div v-if="isUserMenuOpen" class="user-dropdown" role="menu">
+                            <div class="user-menu-card">
+                                <span class="user-avatar" aria-hidden="true">
+                                    {{ userInitial }}
+                                </span>
+                                <div>
+                                    <strong>{{ currentUser.display_name }}</strong>
+                                    <small>{{ currentUser.email }}</small>
+                                </div>
+                                <em>{{ currentUserRoleLabel }}</em>
+                            </div>
+                            <button type="button" role="menuitem" @click="openCreditsModal">
+                                <Coins :size="16" />
+                                <span>积分账户</span>
+                                <strong>{{ creditBalance === null ? "--" : creditBalance }}</strong>
+                            </button>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                @click="loadRemoteHistory(); closeUserMenu()"
+                            >
+                                <RefreshCw :size="16" />
+                                <span>同步历史</span>
+                            </button>
+                            <button
+                                v-if="isAdmin"
+                                type="button"
+                                role="menuitem"
+                                @click="showAdminUsersPage"
+                            >
+                                <Users :size="16" />
+                                <span>用户管理</span>
+                            </button>
+                            <button
+                                v-if="isAdmin"
+                                type="button"
+                                role="menuitem"
+                                @click="showAdminPage"
+                            >
+                                <ShieldCheck :size="16" />
+                                <span>后台统计</span>
+                            </button>
+                            <button type="button" role="menuitem" @click="logout">
+                                <LogOut :size="16" />
+                                <span>退出登录</span>
+                            </button>
+                        </div>
+                    </div>
                     <button
                         v-else
                         class="auth-action"
@@ -1317,6 +2233,632 @@ function previewUrl(result: SearchResult): string {
             </section>
         </section>
 
+        <section
+            v-else-if="currentPage === 'admin' && !hasSearched"
+            class="admin-page"
+            aria-labelledby="admin-title"
+        >
+            <header class="home-nav admin-nav" aria-label="后台统计导航">
+                <button
+                    class="home-brand"
+                    type="button"
+                    aria-label="返回 Neko AI Search 首页"
+                    @click="showHomePage"
+                >
+                    <img :src="logoUrl" alt="" />
+                    <span class="brand-name">Neko AI Search</span>
+                </button>
+                <div class="home-actions">
+                    <button
+                        class="icon-button"
+                        type="button"
+                        :aria-label="themeToggleLabel"
+                        :title="themeToggleLabel"
+                        @click="toggleTheme"
+                    >
+                        <Sun v-if="isDarkTheme" :size="18" />
+                        <Moon v-else :size="18" />
+                    </button>
+                    <div v-if="currentUser" class="user-menu">
+                        <button
+                            class="auth-action is-signed"
+                            type="button"
+                            :aria-expanded="isUserMenuOpen"
+                            aria-haspopup="menu"
+                            @click="toggleUserMenu"
+                        >
+                            <span class="user-avatar" aria-hidden="true">{{ userInitial }}</span>
+                            <span class="user-display">{{ currentUser.display_name }}</span>
+                            <ChevronDown :size="15" aria-hidden="true" />
+                        </button>
+                        <div v-if="isUserMenuOpen" class="user-dropdown" role="menu">
+                            <div class="user-menu-card">
+                                <span class="user-avatar" aria-hidden="true">
+                                    {{ userInitial }}
+                                </span>
+                                <div>
+                                    <strong>{{ currentUser.display_name }}</strong>
+                                    <small>{{ currentUser.email }}</small>
+                                </div>
+                                <em>{{ currentUserRoleLabel }}</em>
+                            </div>
+                            <button type="button" role="menuitem" @click="openCreditsModal">
+                                <Coins :size="16" />
+                                <span>积分账户</span>
+                                <strong>{{ creditBalance === null ? "--" : creditBalance }}</strong>
+                            </button>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                @click="loadRemoteHistory(); closeUserMenu()"
+                            >
+                                <RefreshCw :size="16" />
+                                <span>同步历史</span>
+                            </button>
+                            <button
+                                v-if="isAdmin"
+                                type="button"
+                                role="menuitem"
+                                @click="showAdminUsersPage"
+                            >
+                                <Users :size="16" />
+                                <span>用户管理</span>
+                            </button>
+                            <button
+                                v-if="isAdmin"
+                                type="button"
+                                role="menuitem"
+                                @click="showAdminPage"
+                            >
+                                <ShieldCheck :size="16" />
+                                <span>后台统计</span>
+                            </button>
+                            <button type="button" role="menuitem" @click="logout">
+                                <LogOut :size="16" />
+                                <span>退出登录</span>
+                            </button>
+                        </div>
+                    </div>
+                    <button
+                        v-else
+                        class="auth-action"
+                        type="button"
+                        @click="openAuthModal('login')"
+                    >
+                        <LogIn :size="16" />
+                        <span>登录</span>
+                    </button>
+                    <button class="outline-action" type="button" @click="showGuidePage">
+                        平台指南
+                    </button>
+                    <a
+                        class="solid-action github-action"
+                        :href="GITHUB_REPO_URL"
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label="打开 Neko AI Search GitHub 仓库"
+                    >
+                        <svg
+                            class="github-mark"
+                            viewBox="0 0 24 24"
+                            aria-hidden="true"
+                            focusable="false"
+                        >
+                            <path
+                                fill="currentColor"
+                                d="
+                                    M12 2C6.48 2 2 6.58 2 12.22c0 4.52 2.87 8.35 6.84 9.7
+                                    .5.1.68-.22.68-.5v-1.75c-2.78.62-3.37-1.37-3.37-1.37
+                                    -.45-1.18-1.11-1.5-1.11-1.5-.91-.63.07-.62.07-.62
+                                    1 .07 1.53 1.06 1.53 1.06.9 1.56 2.35 1.11 2.92.85
+                                    .09-.66.35-1.11.63-1.36-2.22-.26-4.56-1.14-4.56-5.05
+                                    0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71
+                                    0 0 .84-.27 2.75 1.05A9.36 9.36 0 0 1 12 6.93
+                                    c.85 0 1.7.12 2.5.34 1.9-1.32 2.74-1.05 2.74-1.05
+                                    .55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75
+                                    0 3.92-2.34 4.78-4.57 5.03.36.32.68.94.68 1.9v2.81
+                                    c0 .28.18.6.69.5A10.11 10.11 0 0 0 22 12.22
+                                    C22 6.58 17.52 2 12 2Z
+                                "
+                            />
+                        </svg>
+                        <span>GitHub</span>
+                        <ArrowUpRight :size="15" aria-hidden="true" />
+                    </a>
+                </div>
+            </header>
+
+            <section class="admin-console" aria-labelledby="admin-title">
+                <div class="admin-hero">
+                    <div>
+                        <p class="guide-kicker">Admin console</p>
+                        <h2 id="admin-title">平台后台统计</h2>
+                        <p>
+                            汇总用户、积分、搜索历史和近期流水，帮助管理员快速判断平台运行状态。
+                        </p>
+                    </div>
+                    <button
+                        class="outline-action admin-refresh-action"
+                        type="button"
+                        :disabled="adminLoading || !isAdmin"
+                        @click="loadAdminStats"
+                    >
+                        <Loader2 v-if="adminLoading" class="spin" :size="15" />
+                        <ShieldCheck v-else :size="15" />
+                        <span>{{ adminLoading ? "同步中" : "刷新统计" }}</span>
+                    </button>
+                </div>
+
+                <div v-if="adminError" class="error-box admin-error" role="alert">
+                    {{ adminError }}
+                </div>
+
+                <div v-if="!currentUser" class="admin-access-panel">
+                    <strong>需要管理员登录</strong>
+                    <p>后台统计使用 Session Cookie 鉴权，只允许管理员邮箱白名单访问。</p>
+                    <button class="auth-action" type="button" @click="openAuthModal('login')">
+                        <LogIn :size="16" />
+                        <span>登录管理员账号</span>
+                    </button>
+                </div>
+
+                <div v-else-if="!isAdmin" class="admin-access-panel">
+                    <strong>当前账号无后台权限</strong>
+                    <p>请切换到配置在 ADMIN_EMAILS 中的管理员账号后再查看统计。</p>
+                </div>
+
+                <div
+                    v-else-if="adminLoading && !adminStats"
+                    class="admin-stat-grid"
+                    aria-label="后台统计加载中"
+                >
+                    <article v-for="index in 4" :key="index" class="admin-stat-card is-loading">
+                        <span />
+                        <strong />
+                        <small />
+                    </article>
+                </div>
+
+                <template v-else-if="adminStats">
+                    <div class="admin-stat-grid" aria-label="核心统计">
+                        <article
+                            v-for="card in adminSummaryCards"
+                            :key="card.label"
+                            class="admin-stat-card"
+                        >
+                            <span>{{ card.label }}</span>
+                            <strong>{{ card.value }}</strong>
+                            <small>{{ card.detail }}</small>
+                        </article>
+                    </div>
+
+                    <div class="admin-board-grid">
+                        <article class="admin-panel">
+                            <div class="admin-panel-heading">
+                                <span>搜索与历史</span>
+                                <strong>
+                                    {{ formatNumber(adminStats.summary.searches_today) }}
+                                </strong>
+                            </div>
+                            <dl class="admin-metric-list">
+                                <div>
+                                    <dt>搜索扣减次数</dt>
+                                    <dd>
+                                        {{ formatNumber(adminStats.summary.total_search_debits) }}
+                                    </dd>
+                                </div>
+                                <div>
+                                    <dt>历史记录总量</dt>
+                                    <dd>
+                                        {{ formatNumber(adminStats.summary.total_history_items) }}
+                                    </dd>
+                                </div>
+                                <div>
+                                    <dt>快速历史</dt>
+                                    <dd>
+                                        {{ formatNumber(adminStats.summary.fast_history_items) }}
+                                    </dd>
+                                </div>
+                                <div>
+                                    <dt>深度历史</dt>
+                                    <dd>
+                                        {{ formatNumber(adminStats.summary.deep_history_items) }}
+                                    </dd>
+                                </div>
+                            </dl>
+                        </article>
+
+                        <article class="admin-panel">
+                            <div class="admin-panel-heading">
+                                <span>积分流水原因</span>
+                                <strong>{{ adminStats.credit_reasons.length }}</strong>
+                            </div>
+                            <div class="admin-reason-list">
+                                <div
+                                    v-for="reason in adminStats.credit_reasons"
+                                    :key="reason.reason"
+                                    class="admin-reason-row"
+                                >
+                                    <div>
+                                        <strong>{{ creditReasonLabel(reason.reason) }}</strong>
+                                        <span>{{ reason.ledger_count }} 笔流水</span>
+                                    </div>
+                                    <em :class="{ 'is-positive': reason.total_change > 0 }">
+                                        {{ formatSignedNumber(reason.total_change) }}
+                                    </em>
+                                </div>
+                            </div>
+                        </article>
+
+                        <article class="admin-panel is-wide">
+                            <div class="admin-panel-heading">
+                                <span>最近用户</span>
+                                <strong>{{ adminStats.recent_users.length }}</strong>
+                            </div>
+                            <div class="admin-table">
+                                <div class="admin-table-head">
+                                    <span>账号</span>
+                                    <span>积分</span>
+                                    <span>历史</span>
+                                    <span>注册时间</span>
+                                </div>
+                                <div
+                                    v-for="user in adminStats.recent_users"
+                                    :key="user.id"
+                                    class="admin-table-row"
+                                >
+                                    <span>
+                                        <strong>{{ user.display_name }}</strong>
+                                        <small>{{ user.email }}</small>
+                                    </span>
+                                    <span>{{ formatNumber(user.balance) }}</span>
+                                    <span>{{ formatNumber(user.history_count) }}</span>
+                                    <span>{{ formatShortDate(user.created_at) }}</span>
+                                </div>
+                            </div>
+                        </article>
+
+                        <article class="admin-panel is-wide">
+                            <div class="admin-panel-heading">
+                                <span>最近搜索</span>
+                                <strong>{{ adminStats.recent_searches.length }}</strong>
+                            </div>
+                            <div class="admin-search-list">
+                                <div
+                                    v-for="item in adminStats.recent_searches"
+                                    :key="item.id"
+                                    class="admin-search-row"
+                                >
+                                    <div>
+                                        <strong>{{ item.query }}</strong>
+                                        <span>{{ item.user_email }}</span>
+                                    </div>
+                                    <small>{{ item.mode === "deep" ? "深度" : "快速" }}</small>
+                                    <time>{{ formatShortDate(item.created_at) }}</time>
+                                </div>
+                            </div>
+                        </article>
+                    </div>
+                </template>
+            </section>
+        </section>
+
+        <section
+            v-else-if="currentPage === 'adminUsers' && !hasSearched"
+            class="admin-page"
+            aria-labelledby="admin-users-title"
+        >
+            <header class="home-nav admin-nav" aria-label="用户管理导航">
+                <button
+                    class="home-brand"
+                    type="button"
+                    aria-label="返回 Neko AI Search 首页"
+                    @click="showHomePage"
+                >
+                    <img :src="logoUrl" alt="" />
+                    <span class="brand-name">Neko AI Search</span>
+                </button>
+                <div class="home-actions">
+                    <button
+                        class="icon-button"
+                        type="button"
+                        :aria-label="themeToggleLabel"
+                        :title="themeToggleLabel"
+                        @click="toggleTheme"
+                    >
+                        <Sun v-if="isDarkTheme" :size="18" />
+                        <Moon v-else :size="18" />
+                    </button>
+                    <div v-if="currentUser" class="user-menu">
+                        <button
+                            class="auth-action is-signed"
+                            type="button"
+                            :aria-expanded="isUserMenuOpen"
+                            aria-haspopup="menu"
+                            @click="toggleUserMenu"
+                        >
+                            <span class="user-avatar" aria-hidden="true">{{ userInitial }}</span>
+                            <span class="user-display">{{ currentUser.display_name }}</span>
+                            <ChevronDown :size="15" aria-hidden="true" />
+                        </button>
+                        <div v-if="isUserMenuOpen" class="user-dropdown" role="menu">
+                            <div class="user-menu-card">
+                                <span class="user-avatar" aria-hidden="true">
+                                    {{ userInitial }}
+                                </span>
+                                <div>
+                                    <strong>{{ currentUser.display_name }}</strong>
+                                    <small>{{ currentUser.email }}</small>
+                                </div>
+                                <em>{{ currentUserRoleLabel }}</em>
+                            </div>
+                            <button type="button" role="menuitem" @click="openCreditsModal">
+                                <Coins :size="16" />
+                                <span>积分账户</span>
+                                <strong>{{ creditBalance === null ? "--" : creditBalance }}</strong>
+                            </button>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                @click="loadRemoteHistory(); closeUserMenu()"
+                            >
+                                <RefreshCw :size="16" />
+                                <span>同步历史</span>
+                            </button>
+                            <button
+                                v-if="isAdmin"
+                                type="button"
+                                role="menuitem"
+                                @click="showAdminUsersPage"
+                            >
+                                <Users :size="16" />
+                                <span>用户管理</span>
+                            </button>
+                            <button
+                                v-if="isAdmin"
+                                type="button"
+                                role="menuitem"
+                                @click="showAdminPage"
+                            >
+                                <ShieldCheck :size="16" />
+                                <span>后台统计</span>
+                            </button>
+                            <button type="button" role="menuitem" @click="logout">
+                                <LogOut :size="16" />
+                                <span>退出登录</span>
+                            </button>
+                        </div>
+                    </div>
+                    <button
+                        v-else
+                        class="auth-action"
+                        type="button"
+                        @click="openAuthModal('login')"
+                    >
+                        <LogIn :size="16" />
+                        <span>登录</span>
+                    </button>
+                    <button class="outline-action" type="button" @click="showGuidePage">
+                        平台指南
+                    </button>
+                    <a
+                        class="solid-action github-action"
+                        :href="GITHUB_REPO_URL"
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label="打开 Neko AI Search GitHub 仓库"
+                    >
+                        <svg
+                            class="github-mark"
+                            viewBox="0 0 24 24"
+                            aria-hidden="true"
+                            focusable="false"
+                        >
+                            <path
+                                fill="currentColor"
+                                d="
+                                    M12 2C6.48 2 2 6.58 2 12.22c0 4.52 2.87 8.35 6.84 9.7
+                                    .5.1.68-.22.68-.5v-1.75c-2.78.62-3.37-1.37-3.37-1.37
+                                    -.45-1.18-1.11-1.5-1.11-1.5-.91-.63.07-.62.07-.62
+                                    1 .07 1.53 1.06 1.53 1.06.9 1.56 2.35 1.11 2.92.85
+                                    .09-.66.35-1.11.63-1.36-2.22-.26-4.56-1.14-4.56-5.05
+                                    0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71
+                                    0 0 .84-.27 2.75 1.05A9.36 9.36 0 0 1 12 6.93
+                                    c.85 0 1.7.12 2.5.34 1.9-1.32 2.74-1.05 2.74-1.05
+                                    .55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75
+                                    0 3.92-2.34 4.78-4.57 5.03.36.32.68.94.68 1.9v2.81
+                                    c0 .28.18.6.69.5A10.11 10.11 0 0 0 22 12.22
+                                    C22 6.58 17.52 2 12 2Z
+                                "
+                            />
+                        </svg>
+                        <span>GitHub</span>
+                        <ArrowUpRight :size="15" aria-hidden="true" />
+                    </a>
+                </div>
+            </header>
+
+            <section class="admin-console admin-users-console" aria-labelledby="admin-users-title">
+                <div class="admin-hero admin-users-hero">
+                    <div>
+                        <p class="guide-kicker">User operations</p>
+                        <h2 id="admin-users-title">用户管理</h2>
+                        <p>
+                            统一查看平台账号、角色、状态、积分余额和历史数量，
+                            管理员可创建用户、禁用账号并按需补充积分。
+                        </p>
+                    </div>
+                    <div class="admin-page-switch" aria-label="后台页面切换">
+                        <button class="outline-action" type="button" @click="showAdminPage">
+                            <ShieldCheck :size="15" />
+                            <span>后台统计</span>
+                        </button>
+                        <button class="outline-action is-active" type="button">
+                            <Users :size="15" />
+                            <span>用户管理</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="adminUsersError" class="error-box admin-error" role="alert">
+                    {{ adminUsersError }}
+                </div>
+
+                <div v-if="!currentUser" class="admin-access-panel">
+                    <strong>需要管理员登录</strong>
+                    <p>用户管理使用 Session Cookie 鉴权，只允许管理员账号访问。</p>
+                    <button class="auth-action" type="button" @click="openAuthModal('login')">
+                        <LogIn :size="16" />
+                        <span>登录管理员账号</span>
+                    </button>
+                </div>
+
+                <div v-else-if="!isAdmin" class="admin-access-panel">
+                    <strong>当前账号无用户管理权限</strong>
+                    <p>普通用户无法看到用户管理入口，也无法访问该页面的数据接口。</p>
+                </div>
+
+                <template v-else>
+                    <section class="admin-user-toolbar" aria-label="用户管理工具栏">
+                        <form class="admin-user-search" @submit.prevent="searchAdminUsers">
+                            <Search :size="17" aria-hidden="true" />
+                            <input
+                                v-model="adminUserQuery"
+                                autocomplete="off"
+                                placeholder="搜索昵称或邮箱"
+                                aria-label="搜索用户"
+                            />
+                            <button type="submit" :disabled="adminUsersLoading">
+                                <Loader2 v-if="adminUsersLoading" class="spin" :size="15" />
+                                <span v-else>搜索</span>
+                            </button>
+                        </form>
+                        <button
+                            class="solid-action admin-create-user"
+                            type="button"
+                            @click="openCreateAdminUserModal"
+                        >
+                            <Plus :size="16" />
+                            <span>创建用户</span>
+                        </button>
+                    </section>
+
+                    <div
+                        v-if="adminUsersLoading && !adminUsers.length"
+                        class="admin-user-table-panel is-loading"
+                        aria-label="用户列表加载中"
+                    >
+                        <span />
+                        <span />
+                        <span />
+                    </div>
+
+                    <section v-else class="admin-user-table-panel" aria-label="用户列表">
+                        <div class="admin-panel-heading">
+                            <span>用户列表</span>
+                            <strong>{{ formatNumber(adminUsersTotal) }} 个账号</strong>
+                        </div>
+
+                        <div class="admin-user-table">
+                            <div class="admin-user-head">
+                                <span>用户</span>
+                                <span>角色</span>
+                                <span>状态</span>
+                                <span>积分</span>
+                                <span>历史</span>
+                                <span>注册时间</span>
+                                <span>操作</span>
+                            </div>
+
+                            <p v-if="!adminUsers.length" class="admin-user-empty">
+                                暂无匹配用户
+                            </p>
+
+                            <div
+                                v-for="user in adminUsers"
+                                :key="user.id"
+                                :class="[
+                                    'admin-user-row',
+                                    { 'is-disabled': user.status === 'disabled' },
+                                ]"
+                            >
+                                <span class="admin-user-identity">
+                                    <span class="admin-user-avatar" aria-hidden="true">
+                                        {{ user.display_name.slice(0, 1).toUpperCase() || "N" }}
+                                    </span>
+                                    <span>
+                                        <strong>{{ user.display_name }}</strong>
+                                        <small :title="user.email">
+                                            {{ maskedEmail(user.email) }}
+                                        </small>
+                                    </span>
+                                </span>
+                                <span>
+                                    <em :class="['admin-role-pill', `is-${user.role}`]">
+                                        {{ userRoleLabel(user.role) }}
+                                    </em>
+                                </span>
+                                <span>
+                                    <em
+                                        :class="[
+                                            'admin-status-pill',
+                                            user.status === 'disabled'
+                                                ? 'is-disabled'
+                                                : 'is-active',
+                                        ]"
+                                    >
+                                        {{ userStatusLabel(user.status) }}
+                                    </em>
+                                </span>
+                                <span>{{ formatNumber(user.balance) }}</span>
+                                <span>{{ formatNumber(user.history_count) }}</span>
+                                <span>{{ formatShortDate(user.created_at) }}</span>
+                                <span class="admin-user-actions">
+                                    <button
+                                        type="button"
+                                        title="编辑用户"
+                                        @click="openEditAdminUserModal(user)"
+                                    >
+                                        <Pencil :size="15" />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        title="删除用户"
+                                        :disabled="currentUser?.id === user.id"
+                                        @click="deleteAdminUser(user)"
+                                    >
+                                        <Trash2 :size="15" />
+                                    </button>
+                                </span>
+                            </div>
+                        </div>
+
+                        <div class="admin-user-pagination">
+                            <span>
+                                第 {{ adminUsersPage }} / {{ adminUsersPageCount }} 页
+                            </span>
+                            <div>
+                                <button
+                                    type="button"
+                                    :disabled="!canLoadPreviousAdminUsers || adminUsersLoading"
+                                    @click="loadPreviousAdminUsers"
+                                >
+                                    上一页
+                                </button>
+                                <button
+                                    type="button"
+                                    :disabled="!canLoadNextAdminUsers || adminUsersLoading"
+                                    @click="loadNextAdminUsers"
+                                >
+                                    下一页
+                                </button>
+                            </div>
+                        </div>
+                    </section>
+                </template>
+            </section>
+        </section>
+
         <section v-else class="results-view" aria-label="搜索结果">
             <!-- 结果页顶部栏保留搜索入口和主题切换。 -->
             <header class="topbar">
@@ -1341,6 +2883,7 @@ function previewUrl(result: SearchResult): string {
                             <button
                                 type="button"
                                 :class="{ 'is-active': searchMode === 'fast' }"
+                                title="快速搜索消耗 1 积分"
                                 @click="searchMode = 'fast'"
                             >
                                 快速
@@ -1348,11 +2891,22 @@ function previewUrl(result: SearchResult): string {
                             <button
                                 type="button"
                                 :class="{ 'is-active': searchMode === 'deep' }"
+                                title="深度搜索消耗 3 积分"
                                 @click="searchMode = 'deep'"
                             >
                                 深度
                             </button>
                         </div>
+                        <span
+                            :class="[
+                                'compact-cost-pill',
+                                { 'is-low': isSelectedModeUnaffordable },
+                            ]"
+                            :title="searchCostLabel"
+                        >
+                            <Bolt :size="13" aria-hidden="true" />
+                            {{ compactSearchCostLabel }}
+                        </span>
                         <button
                             type="submit"
                             aria-label="搜索"
@@ -1365,26 +2919,70 @@ function previewUrl(result: SearchResult): string {
                         </button>
                     </form>
                     <div class="topbar-actions">
-                        <button
-                            v-if="currentUser"
-                            class="auth-action is-signed"
-                            type="button"
-                            title="刷新云端历史"
-                            @click="loadRemoteHistory"
-                        >
-                            <UserRound :size="16" />
-                            <span>{{ currentUser.display_name }}</span>
-                        </button>
-                        <button
-                            v-if="currentUser"
-                            class="icon-button"
-                            type="button"
-                            aria-label="退出登录"
-                            title="退出登录"
-                            @click="logout"
-                        >
-                            <LogOut :size="17" />
-                        </button>
+                        <div v-if="currentUser" class="user-menu">
+                            <button
+                                class="auth-action is-signed"
+                                type="button"
+                                :aria-expanded="isUserMenuOpen"
+                                aria-haspopup="menu"
+                                @click="toggleUserMenu"
+                            >
+                                <span class="user-avatar" aria-hidden="true">
+                                    {{ userInitial }}
+                                </span>
+                                <span class="user-display">{{ currentUser.display_name }}</span>
+                                <ChevronDown :size="15" aria-hidden="true" />
+                            </button>
+                            <div v-if="isUserMenuOpen" class="user-dropdown" role="menu">
+                                <div class="user-menu-card">
+                                    <span class="user-avatar" aria-hidden="true">
+                                        {{ userInitial }}
+                                    </span>
+                                    <div>
+                                        <strong>{{ currentUser.display_name }}</strong>
+                                        <small>{{ currentUser.email }}</small>
+                                    </div>
+                                    <em>{{ currentUserRoleLabel }}</em>
+                                </div>
+                                <button type="button" role="menuitem" @click="openCreditsModal">
+                                    <Coins :size="16" />
+                                    <span>积分账户</span>
+                                    <strong>
+                                        {{ creditBalance === null ? "--" : creditBalance }}
+                                    </strong>
+                                </button>
+                                <button
+                                    type="button"
+                                    role="menuitem"
+                                    @click="loadRemoteHistory(); closeUserMenu()"
+                                >
+                                    <RefreshCw :size="16" />
+                                    <span>同步历史</span>
+                                </button>
+                                <button
+                                    v-if="isAdmin"
+                                    type="button"
+                                    role="menuitem"
+                                    @click="showAdminUsersPage"
+                                >
+                                    <Users :size="16" />
+                                    <span>用户管理</span>
+                                </button>
+                                <button
+                                    v-if="isAdmin"
+                                    type="button"
+                                    role="menuitem"
+                                    @click="showAdminPage"
+                                >
+                                    <ShieldCheck :size="16" />
+                                    <span>后台统计</span>
+                                </button>
+                                <button type="button" role="menuitem" @click="logout">
+                                    <LogOut :size="16" />
+                                    <span>退出登录</span>
+                                </button>
+                            </div>
+                        </div>
                         <button
                             v-else
                             class="auth-action"
@@ -1690,12 +3288,213 @@ function previewUrl(result: SearchResult): string {
         </section>
 
         <div
+            v-if="isCreditsModalOpen"
+            class="auth-overlay"
+            role="presentation"
+            @click.self="closeCreditsModal"
+        >
+            <section
+                class="credit-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="credits-title"
+            >
+                <button
+                    class="auth-close"
+                    type="button"
+                    aria-label="关闭积分账户窗口"
+                    @click="closeCreditsModal"
+                >
+                    <X :size="18" />
+                </button>
+
+                <div class="credit-hero">
+                    <div>
+                        <p>Credit account</p>
+                        <h2 id="credits-title">积分账户</h2>
+                    </div>
+                    <strong>{{ creditBalance === null ? "--" : creditBalance }}</strong>
+                </div>
+
+                <div class="credit-balance-card">
+                    <span>当前可用积分</span>
+                    <strong>{{ creditBalance === null ? "加载中" : `${creditBalance} 点` }}</strong>
+                    <small>当前步骤仅建立账户和流水，搜索扣费将在下一步启用。</small>
+                </div>
+
+                <div class="credit-ledger-head">
+                    <span>积分流水</span>
+                    <button type="button" :disabled="creditLoading" @click="loadCreditSummary">
+                        <Loader2 v-if="creditLoading" class="spin" :size="14" />
+                        <span v-else>刷新</span>
+                    </button>
+                </div>
+
+                <p v-if="creditsError" class="auth-error">{{ creditsError }}</p>
+                <p v-else-if="!creditLedger.length" class="credit-ledger-empty">
+                    暂无积分流水
+                </p>
+                <div v-else class="credit-ledger-list">
+                    <article
+                        v-for="item in creditLedger"
+                        :key="item.id"
+                        class="credit-ledger-row"
+                    >
+                        <div>
+                            <strong>{{ creditReasonLabel(item.reason) }}</strong>
+                            <span>{{ item.created_at }}</span>
+                        </div>
+                        <div>
+                            <strong :class="{ 'is-positive': item.change_amount > 0 }">
+                                {{ formatCreditDelta(item) }}
+                            </strong>
+                            <span>余额 {{ item.balance_after }}</span>
+                        </div>
+                    </article>
+                </div>
+            </section>
+        </div>
+
+        <div
+            v-if="isAdminUserModalOpen"
+            class="auth-overlay"
+            role="presentation"
+            @click.self="closeAdminUserModal"
+        >
+            <section
+                class="auth-dialog admin-user-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="admin-user-modal-title"
+            >
+                <button
+                    class="auth-close"
+                    type="button"
+                    aria-label="关闭用户编辑窗口"
+                    @click="closeAdminUserModal"
+                >
+                    <X :size="18" />
+                </button>
+
+                <div class="auth-dialog-head">
+                    <span class="auth-emblem">
+                        <UserCog :size="27" />
+                    </span>
+                    <div>
+                        <p>Admin user</p>
+                        <h2 id="admin-user-modal-title">{{ adminUserModalTitle }}</h2>
+                    </div>
+                </div>
+
+                <form class="auth-form admin-user-form" @submit.prevent="submitAdminUserForm">
+                    <div class="admin-form-grid">
+                        <label>
+                            <span>邮箱</span>
+                            <input
+                                v-model="adminUserEmail"
+                                :disabled="adminUserModalMode === 'edit'"
+                                autocomplete="email"
+                                inputmode="email"
+                                placeholder="user@example.com"
+                                required
+                            />
+                        </label>
+                        <label v-if="adminUserModalMode === 'create'">
+                            <span>初始密码</span>
+                            <input
+                                v-model="adminUserPassword"
+                                autocomplete="new-password"
+                                minlength="8"
+                                maxlength="128"
+                                type="password"
+                                placeholder="至少 8 位字符"
+                                required
+                            />
+                        </label>
+                    </div>
+
+                    <label>
+                        <span>昵称</span>
+                        <input
+                            v-model="adminUserDisplayName"
+                            autocomplete="name"
+                            maxlength="80"
+                            placeholder="例如 Neko Explorer"
+                            required
+                        />
+                    </label>
+
+                    <div class="admin-form-grid">
+                        <label>
+                            <span>角色</span>
+                            <select v-model="adminUserRole">
+                                <option value="user">普通用户</option>
+                                <option value="admin">管理员</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>状态</span>
+                            <select v-model="adminUserStatus">
+                                <option value="active">正常</option>
+                                <option value="disabled">禁用</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <section
+                        v-if="adminUserModalMode === 'edit'"
+                        class="admin-credit-editor"
+                        aria-label="积分调整"
+                    >
+                        <div>
+                            <strong>积分调整</strong>
+                            <small>填写正数为补充积分，负数为扣减积分，留空则不调整。</small>
+                        </div>
+                        <div class="admin-form-grid">
+                            <label>
+                                <span>调整数量</span>
+                                <input
+                                    v-model="adminCreditDelta"
+                                    inputmode="numeric"
+                                    placeholder="例如 10 或 -5"
+                                />
+                            </label>
+                            <label>
+                                <span>流水原因</span>
+                                <input
+                                    v-model="adminCreditReason"
+                                    maxlength="80"
+                                    placeholder="manual_grant"
+                                />
+                            </label>
+                        </div>
+                    </section>
+
+                    <p v-if="adminUserFormError" class="auth-error">
+                        {{ adminUserFormError }}
+                    </p>
+
+                    <button class="auth-submit" type="submit" :disabled="adminUserSaving">
+                        <Loader2 v-if="adminUserSaving" class="spin" :size="17" />
+                        <Save v-else :size="17" />
+                        <span>{{ adminUserSaving ? "保存中" : "保存用户" }}</span>
+                    </button>
+                </form>
+            </section>
+        </div>
+
+        <div
             v-if="isAuthModalOpen"
             class="auth-overlay"
             role="presentation"
             @click.self="closeAuthModal"
         >
-            <section class="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+            <section
+                class="auth-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="auth-title"
+            >
                 <button
                     class="auth-close"
                     type="button"

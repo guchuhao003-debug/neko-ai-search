@@ -21,6 +21,7 @@ class Settings:
     app_name: str
     app_env: str
     frontend_origins: list[str]
+    trusted_proxy_ips: list[str]
     tavily_api_key: str | None
     tavily_max_results: int
     deepseek_api_key: str | None
@@ -40,12 +41,15 @@ class Settings:
     session_cookie_name: str
     session_ttl_seconds: int
     session_cookie_secure: bool
+    admin_emails: list[str]
+    credit_initial_balance: int
     rate_limit_per_minute: int
     ip_daily_external_quota: int
     global_daily_external_quota: int
     ip_concurrent_streams: int
     security_blocked_terms_path: str
     search_cache_ttl_seconds: int
+    auth_rate_limit_per_minute: int
 
 
 def _split_csv(value: str) -> list[str]:
@@ -70,6 +74,7 @@ def get_settings() -> Settings:
                 "http://localhost:5173,http://127.0.0.1:5173",
             )
         ),
+        trusted_proxy_ips=_split_csv(os.getenv("TRUSTED_PROXY_IPS", "")),
         tavily_api_key=os.getenv("TAVILY_API_KEY") or None,
         tavily_max_results=int(os.getenv("TAVILY_MAX_RESULTS", "8")),
         deepseek_api_key=os.getenv("DEEPSEEK_API_KEY") or None,
@@ -97,6 +102,8 @@ def get_settings() -> Settings:
         session_cookie_name=os.getenv("SESSION_COOKIE_NAME", "neko_session"),
         session_ttl_seconds=int(os.getenv("SESSION_TTL_SECONDS", "604800")),
         session_cookie_secure=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
+        admin_emails=_split_csv(os.getenv("ADMIN_EMAILS", "admin@example.com")),
+        credit_initial_balance=int(os.getenv("CREDIT_INITIAL_BALANCE", "20")),
         rate_limit_per_minute=int(os.getenv("RATE_LIMIT_PER_MINUTE", "10")),
         ip_daily_external_quota=int(os.getenv("IP_DAILY_EXTERNAL_QUOTA", "50")),
         global_daily_external_quota=int(
@@ -108,4 +115,5 @@ def get_settings() -> Settings:
             _default_security_terms_path(),
         ),
         search_cache_ttl_seconds=int(os.getenv("SEARCH_CACHE_TTL_SECONDS", "1800")),
+        auth_rate_limit_per_minute=int(os.getenv("AUTH_RATE_LIMIT_PER_MINUTE", "8")),
     )

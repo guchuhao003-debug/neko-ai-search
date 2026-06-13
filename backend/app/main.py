@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator
+from ipaddress import ip_address, ip_network
+from time import monotonic
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -11,8 +14,23 @@ from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
 from app.config import get_settings
 from app.schemas import (
+    AdminCreateUserRequest,
+    AdminCreditReasonResponseItem,
+    AdminCreditAdjustmentRequest,
+    AdminCreditAdjustmentResponse,
+    AdminDeleteUserResponse,
+    AdminManagedUserResponseItem,
+    AdminRecentSearchResponseItem,
+    AdminRecentUserResponseItem,
+    AdminStatsResponse,
+    AdminStatsSummaryResponse,
+    AdminUpdateUserRequest,
+    AdminUserListResponse,
     AuthStatusResponse,
     AuthUser,
+    CreditAccountResponse,
+    CreditLedgerResponseItem,
+    CreditSummaryResponse,
     LoginRequest,
     RegisterRequest,
     SearchHistoryListResponse,
@@ -21,10 +39,21 @@ from app.schemas import (
     SearchResponse,
 )
 from app.services.account_service import (
+    ADMIN_ROLE,
+    DISABLED_STATUS,
+    USER_ROLE,
+    AdminCreditReasonStat,
+    AdminManagedUser,
+    AdminRecentSearchStat,
+    AdminRecentUserStat,
+    AdminStatsSummary,
     AccountUser,
+    CreditAccount,
+    CreditLedgerRecord,
     DuplicateUserError,
     HistoryRecord,
     InvalidCredentialsError,
+    InsufficientCreditError,
     SessionRecord,
     create_account_service,
 )
@@ -47,6 +76,48 @@ account_service = create_account_service(settings)
 security_service = SecurityService(settings.security_blocked_terms_path)
 metrics = MetricsRegistry()
 
+SEARCH_CREDIT_COSTS: Dict[str, int] = {"fast": 1, "deep": 3}
+SEARCH_USAGE_REASON = "search_usage"
+SEARCH_REFERENCE_TYPE = "search"
+
+
+class AuthRateLimiter:
+    """Process-local limiter for login and registration attempts."""
+
+    def __init__(self, *, clock=monotonic) -> None:
+        """Create an auth limiter with a monotonic clock."""
+        self.clock = clock
+        self._hits: dict[str, deque[float]] = defaultdict(deque)
+
+    def check(self, client_id: str, limit: int) -> None:
+        """Raise an HTTP 429 when a client exceeds auth attempt limits."""
+        now = self.clock()
+        window_start = now - 60
+        hits = self._hits[client_id]
+        while hits and hits[0] <= window_start:
+            hits.popleft()
+
+        if len(hits) >= limit:
+            retry_after = max(round(60 - (now - hits[0])), 1)
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "auth_rate_limited",
+                    "message": "登录或注册尝试过于频繁，请稍后再试。",
+                    "retry_after_seconds": retry_after,
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        hits.append(now)
+
+    def reset(self) -> None:
+        """Clear auth limiter counters for tests."""
+        self._hits.clear()
+
+
+auth_rate_limiter = AuthRateLimiter()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.frontend_origins,
@@ -68,11 +139,44 @@ def get_ai_service() -> DeepSeekService:
 
 def get_client_id(request: Request) -> str:
     """Return a stable client identifier for rate limiting."""
+    direct_host = request.client.host if request.client else "unknown"
     forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",", maxsplit=1)[0].strip()
+    if forwarded_for and is_trusted_proxy_host(direct_host):
+        forwarded_host = forwarded_for.split(",", maxsplit=1)[0].strip()
+        return forwarded_host or direct_host
 
-    return request.client.host if request.client else "unknown"
+    return direct_host
+
+
+def is_trusted_proxy_host(host: str) -> bool:
+    """Return whether the direct client is allowed to supply forwarding headers."""
+    if host in settings.trusted_proxy_ips:
+        return True
+
+    try:
+        client_ip = ip_address(host)
+    except ValueError:
+        return False
+
+    for trusted_proxy in settings.trusted_proxy_ips:
+        try:
+            if client_ip in ip_network(trusted_proxy, strict=False):
+                return True
+        except ValueError:
+            continue
+
+    return False
+
+
+def check_auth_rate_limit(request: Request, email: str | None = None) -> None:
+    """Limit login and registration attempts by IP and target email."""
+    limit = settings.auth_rate_limit_per_minute
+    client_id = get_client_id(request)
+    auth_rate_limiter.check(f"ip:{client_id}", limit)
+
+    if email:
+        normalized_email = email.strip().lower()
+        auth_rate_limiter.check(f"email:{normalized_email}", limit)
 
 
 def guard_error_payload(
@@ -118,6 +222,125 @@ def security_error_payload(
 def raise_security_http_error(exc: SecurityBlockedError) -> None:
     """Raise an HTTP error for blocked non-streaming requests."""
     raise HTTPException(status_code=400, detail=security_error_payload(exc))
+
+
+class SearchAuthenticationError(Exception):
+    """Raised when a search request has no authenticated user."""
+
+    code = "authentication_required"
+    message = "请先登录后再使用积分搜索。"
+
+    def __str__(self) -> str:
+        """Return the user-facing authentication message."""
+        return self.message
+
+
+class SearchCreditError(Exception):
+    """Raised when a user cannot afford the current paid search mode."""
+
+    code = "insufficient_credits"
+
+    def __init__(self, required_credits: int, current_balance: int) -> None:
+        """Create an error with the required and available credit amounts."""
+        self.required_credits = required_credits
+        self.current_balance = current_balance
+        super().__init__(self.message)
+
+    @property
+    def message(self) -> str:
+        """Return the user-facing insufficient credit message."""
+        return (
+            f"当前搜索需要 {self.required_credits} 积分，"
+            f"你的余额为 {self.current_balance} 积分。"
+        )
+
+
+def search_auth_error_payload(
+    exc: SearchAuthenticationError,
+    search_id: Optional[str] = None,
+) -> Dict[str, object]:
+    """Serialize a search authentication error for HTTP and SSE responses."""
+    payload: Dict[str, object] = {
+        "code": exc.code,
+        "message": str(exc),
+    }
+    if search_id:
+        payload["search_id"] = search_id
+    return payload
+
+
+def search_credit_error_payload(
+    exc: SearchCreditError,
+    search_id: Optional[str] = None,
+) -> Dict[str, object]:
+    """Serialize an insufficient-credit error for HTTP and SSE responses."""
+    payload: Dict[str, object] = {
+        "code": exc.code,
+        "message": str(exc),
+        "required_credits": exc.required_credits,
+        "current_balance": exc.current_balance,
+    }
+    if search_id:
+        payload["search_id"] = search_id
+    return payload
+
+
+def search_credit_cost(search_request: SearchRequest) -> int:
+    """Return the credit cost for the requested search mode."""
+    return SEARCH_CREDIT_COSTS[search_request.mode]
+
+
+def check_search_credit(
+    user: AccountUser | None,
+    search_request: SearchRequest,
+) -> tuple[AccountUser, int, CreditAccount]:
+    """Validate authentication and balance before reserving paid API quota."""
+    if user is None:
+        raise SearchAuthenticationError()
+
+    cost = search_credit_cost(search_request)
+    account = account_service.get_credit_account(user.id)
+    if account.balance < cost:
+        raise SearchCreditError(cost, account.balance)
+
+    return user, cost, account
+
+
+def require_search_user(user: AccountUser | None) -> AccountUser:
+    """Require authentication before cache lookup or paid search work."""
+    if user is None:
+        raise SearchAuthenticationError()
+
+    return user
+
+
+def debit_search_credit(
+    user: AccountUser,
+    cost: int,
+    search_id: str,
+) -> CreditLedgerRecord:
+    """Atomically deduct credits immediately before external search work."""
+    try:
+        return account_service.adjust_credits(
+            user.id,
+            -cost,
+            SEARCH_USAGE_REASON,
+            SEARCH_REFERENCE_TYPE,
+            search_id,
+        )
+    except InsufficientCreditError as exc:
+        account = account_service.get_credit_account(user.id)
+        raise SearchCreditError(cost, account.balance) from exc
+
+
+def raise_search_auth_http_error(exc: SearchAuthenticationError) -> None:
+    """Raise an HTTP error for unauthenticated paid search requests."""
+    raise HTTPException(status_code=401, detail=search_auth_error_payload(exc))
+
+
+def raise_search_credit_http_error(exc: SearchCreditError) -> None:
+    """Raise an HTTP error for searches blocked by insufficient credits."""
+    raise HTTPException(status_code=402, detail=search_credit_error_payload(exc))
 
 
 def step_done_payload(step: SearchStep, **extra: object) -> Dict[str, object]:
@@ -172,7 +395,10 @@ def auth_user_payload(user: AccountUser) -> AuthUser:
         id=user.id,
         email=user.email,
         display_name=user.display_name,
+        role=user.role,
+        status=user.status,
         created_at=user.created_at,
+        is_admin=is_admin_user(user),
     )
 
 
@@ -183,6 +409,96 @@ def history_item_payload(item: HistoryRecord) -> SearchHistoryResponseItem:
         query=item.query,
         mode=item.mode,
         created_at=item.created_at,
+    )
+
+
+def credit_account_payload(account: CreditAccount) -> CreditAccountResponse:
+    """Serialize a private credit account into the public API shape."""
+    return CreditAccountResponse(
+        balance=account.balance,
+        updated_at=account.updated_at,
+    )
+
+
+def credit_ledger_payload(item: CreditLedgerRecord) -> CreditLedgerResponseItem:
+    """Serialize a private credit ledger row into the public API shape."""
+    return CreditLedgerResponseItem(
+        id=item.id,
+        change_amount=item.change_amount,
+        balance_after=item.balance_after,
+        reason=item.reason,
+        reference_type=item.reference_type,
+        reference_id=item.reference_id,
+        created_at=item.created_at,
+    )
+
+
+def admin_summary_payload(summary: AdminStatsSummary) -> AdminStatsSummaryResponse:
+    """Serialize administrator summary counters into the API shape."""
+    return AdminStatsSummaryResponse(
+        total_users=summary.total_users,
+        active_sessions=summary.active_sessions,
+        total_history_items=summary.total_history_items,
+        total_credit_balance=summary.total_credit_balance,
+        total_credits_granted=summary.total_credits_granted,
+        total_credits_spent=summary.total_credits_spent,
+        total_search_debits=summary.total_search_debits,
+        fast_history_items=summary.fast_history_items,
+        deep_history_items=summary.deep_history_items,
+        registered_today=summary.registered_today,
+        searches_today=summary.searches_today,
+        credits_spent_today=summary.credits_spent_today,
+    )
+
+
+def admin_recent_user_payload(item: AdminRecentUserStat) -> AdminRecentUserResponseItem:
+    """Serialize a recent administrator user row into the API shape."""
+    return AdminRecentUserResponseItem(
+        id=item.id,
+        email=item.email,
+        display_name=item.display_name,
+        balance=item.balance,
+        history_count=item.history_count,
+        created_at=item.created_at,
+    )
+
+
+def admin_managed_user_payload(item: AdminManagedUser) -> AdminManagedUserResponseItem:
+    """Serialize a managed user row into the administrator API shape."""
+    return AdminManagedUserResponseItem(
+        id=item.id,
+        email=item.email,
+        display_name=item.display_name,
+        role=item.role,
+        status=item.status,
+        balance=item.balance,
+        history_count=item.history_count,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def admin_recent_search_payload(
+    item: AdminRecentSearchStat,
+) -> AdminRecentSearchResponseItem:
+    """Serialize a recent administrator search row into the API shape."""
+    return AdminRecentSearchResponseItem(
+        id=item.id,
+        user_email=item.user_email,
+        query=item.query,
+        mode=item.mode,
+        created_at=item.created_at,
+    )
+
+
+def admin_credit_reason_payload(
+    item: AdminCreditReasonStat,
+) -> AdminCreditReasonResponseItem:
+    """Serialize grouped administrator credit reason statistics."""
+    return AdminCreditReasonResponseItem(
+        reason=item.reason,
+        ledger_count=item.ledger_count,
+        total_change=item.total_change,
     )
 
 
@@ -211,6 +527,12 @@ def get_current_user(request: Request) -> AccountUser | None:
     return account_service.get_user_by_session(token)
 
 
+def is_admin_user(user: AccountUser) -> bool:
+    """Return whether the authenticated user is allowed to access admin APIs."""
+    admin_emails = {email.strip().lower() for email in settings.admin_emails}
+    return user.role == ADMIN_ROLE or user.email.strip().lower() in admin_emails
+
+
 def require_current_user(request: Request) -> AccountUser:
     """Require a valid session cookie for private account endpoints."""
     user = get_current_user(request)
@@ -220,6 +542,20 @@ def require_current_user(request: Request) -> AccountUser:
             detail={
                 "code": "authentication_required",
                 "message": "请先登录后再操作",
+            },
+        )
+    return user
+
+
+def require_admin_user(request: Request) -> AccountUser:
+    """Require a valid administrator session for platform statistics APIs."""
+    user = require_current_user(request)
+    if not is_admin_user(user):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "admin_required",
+                "message": "当前账号没有后台统计权限",
             },
         )
     return user
@@ -272,9 +608,11 @@ async def metrics_endpoint() -> str:
 @app.post("/api/auth/register", response_model=AuthStatusResponse)
 async def register_account(
     payload: RegisterRequest,
+    request: Request,
     response: Response,
 ) -> AuthStatusResponse:
     """Create a user account and start an HTTP-only cookie session."""
+    check_auth_rate_limit(request, payload.email)
     try:
         session = account_service.register(
             payload.email,
@@ -291,9 +629,11 @@ async def register_account(
 @app.post("/api/auth/login", response_model=AuthStatusResponse)
 async def login_account(
     payload: LoginRequest,
+    request: Request,
     response: Response,
 ) -> AuthStatusResponse:
     """Validate user credentials and start an HTTP-only cookie session."""
+    check_auth_rate_limit(request, payload.email)
     try:
         session = account_service.login(payload.email, payload.password)
     except InvalidCredentialsError as exc:
@@ -348,6 +688,183 @@ async def clear_search_history(request: Request) -> SearchHistoryListResponse:
     return SearchHistoryListResponse(items=[])
 
 
+@app.get("/api/credits", response_model=CreditSummaryResponse)
+async def get_credit_summary(request: Request) -> CreditSummaryResponse:
+    """Return the current user's credit balance and recent ledger rows."""
+    user = require_current_user(request)
+    account = account_service.get_credit_account(user.id)
+    ledger = account_service.list_credit_ledger(user.id)
+    return CreditSummaryResponse(
+        account=credit_account_payload(account),
+        ledger=[credit_ledger_payload(item) for item in ledger],
+    )
+
+
+@app.get("/api/admin/users", response_model=AdminUserListResponse)
+async def list_admin_users(
+    request: Request,
+    query: str = Query("", max_length=120),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> AdminUserListResponse:
+    """Return paginated user-management rows for authenticated administrators."""
+    require_admin_user(request)
+    result = account_service.list_admin_users(query, limit, offset)
+    return AdminUserListResponse(
+        items=[admin_managed_user_payload(item) for item in result.items],
+        total=result.total,
+        limit=result.limit,
+        offset=result.offset,
+    )
+
+
+@app.post("/api/admin/users", response_model=AdminManagedUserResponseItem)
+async def create_admin_user(
+    payload: AdminCreateUserRequest,
+    request: Request,
+) -> AdminManagedUserResponseItem:
+    """Create a managed user account as an authenticated administrator."""
+    require_admin_user(request)
+    try:
+        user = account_service.create_user_as_admin(
+            payload.email,
+            payload.password,
+            payload.display_name,
+            payload.role,
+            payload.status,
+        )
+    except DuplicateUserError as exc:
+        raise HTTPException(status_code=409, detail={"message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"message": str(exc)}) from exc
+
+    return admin_managed_user_payload(user)
+
+
+@app.patch("/api/admin/users/{user_id}", response_model=AdminManagedUserResponseItem)
+async def update_admin_user(
+    user_id: int,
+    payload: AdminUpdateUserRequest,
+    request: Request,
+) -> AdminManagedUserResponseItem:
+    """Update a managed user's display name, role, or account status."""
+    admin_user = require_admin_user(request)
+    if payload.display_name is None and payload.role is None and payload.status is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "至少需要提交一个需要更新的字段"},
+        )
+
+    if user_id == admin_user.id and payload.status == DISABLED_STATUS:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "管理员不能禁用自己的账号"},
+        )
+    if user_id == admin_user.id and payload.role == USER_ROLE:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "管理员不能移除自己的管理员角色"},
+        )
+
+    try:
+        user = account_service.update_user_as_admin(
+            user_id,
+            payload.display_name,
+            payload.role,
+            payload.status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"message": str(exc)}) from exc
+
+    if user is None:
+        raise HTTPException(status_code=404, detail={"message": "用户不存在"})
+
+    return admin_managed_user_payload(user)
+
+
+@app.delete("/api/admin/users/{user_id}", response_model=AdminDeleteUserResponse)
+async def delete_admin_user(
+    user_id: int,
+    request: Request,
+) -> AdminDeleteUserResponse:
+    """Delete a managed user account while preventing administrator self-lockout."""
+    admin_user = require_admin_user(request)
+    if user_id == admin_user.id:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "管理员不能删除自己的账号"},
+        )
+
+    deleted = account_service.delete_user_as_admin(user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail={"message": "用户不存在"})
+
+    return AdminDeleteUserResponse(deleted=True)
+
+
+@app.post(
+    "/api/admin/users/{user_id}/credits",
+    response_model=AdminCreditAdjustmentResponse,
+)
+async def adjust_admin_user_credits(
+    user_id: int,
+    payload: AdminCreditAdjustmentRequest,
+    request: Request,
+) -> AdminCreditAdjustmentResponse:
+    """Adjust one managed user's credits and append an auditable ledger row."""
+    admin_user = require_admin_user(request)
+    if payload.change_amount == 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "积分调整值不能为 0"},
+        )
+    if account_service.get_admin_user(user_id) is None:
+        raise HTTPException(status_code=404, detail={"message": "用户不存在"})
+
+    try:
+        ledger = account_service.adjust_credits(
+            user_id,
+            payload.change_amount,
+            payload.reason,
+            "admin_user_adjustment",
+            str(admin_user.id),
+        )
+    except InsufficientCreditError as exc:
+        raise HTTPException(status_code=409, detail={"message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"message": str(exc)}) from exc
+
+    account = account_service.get_credit_account(user_id)
+    user = account_service.get_admin_user(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail={"message": "用户不存在"})
+
+    return AdminCreditAdjustmentResponse(
+        user=admin_managed_user_payload(user),
+        account=credit_account_payload(account),
+        ledger=credit_ledger_payload(ledger),
+    )
+
+
+@app.get("/api/admin/stats", response_model=AdminStatsResponse)
+async def get_admin_stats(request: Request) -> AdminStatsResponse:
+    """Return platform-wide statistics for authenticated administrators."""
+    require_admin_user(request)
+    snapshot = account_service.get_admin_stats()
+    return AdminStatsResponse(
+        summary=admin_summary_payload(snapshot.summary),
+        recent_users=[admin_recent_user_payload(item) for item in snapshot.recent_users],
+        recent_searches=[
+            admin_recent_search_payload(item)
+            for item in snapshot.recent_searches
+        ],
+        credit_reasons=[
+            admin_credit_reason_payload(item)
+            for item in snapshot.credit_reasons
+        ],
+    )
+
+
 @app.get("/api/media-proxy")
 async def media_proxy(
     url: str = Query(..., min_length=8, max_length=2048),
@@ -393,6 +910,13 @@ async def search_once(request: SearchRequest, http_request: Request) -> SearchRe
         step_done_payload(security_step)
         active_step = None
 
+        auth_step = observer.step("authentication")
+        active_step = auth_step
+        auth_step.start_payload()
+        current_user = require_search_user(current_user)
+        step_done_payload(auth_step, user_id=current_user.id)
+        active_step = None
+
         cache_step = observer.step("cache_lookup")
         active_step = cache_step
         cache_step.start_payload()
@@ -406,11 +930,37 @@ async def search_once(request: SearchRequest, http_request: Request) -> SearchRe
             return cached
         metrics.increment("search_cache_misses_total", mode=request.mode)
 
+        credit_check_step = observer.step("credit_check")
+        active_step = credit_check_step
+        credit_check_step.start_payload()
+        current_user, credit_cost, credit_account = check_search_credit(current_user, request)
+        step_done_payload(
+            credit_check_step,
+            required_credits=credit_cost,
+            balance_before=credit_account.balance,
+        )
+        active_step = None
+
         quota_step = observer.step("external_quota")
         active_step = quota_step
         quota_step.start_payload()
         cost_guard.reserve_external_quota(client_id)
         step_done_payload(quota_step, client_id=client_id)
+        active_step = None
+
+        credit_debit_step = observer.step("credit_debit")
+        active_step = credit_debit_step
+        credit_debit_step.start_payload()
+        credit_ledger = debit_search_credit(
+            current_user,
+            credit_cost,
+            observer.search_id,
+        )
+        step_done_payload(
+            credit_debit_step,
+            charged_credits=credit_cost,
+            balance_after=credit_ledger.balance_after,
+        )
         active_step = None
         record_history_if_authenticated(current_user, request)
 
@@ -501,6 +1051,18 @@ async def search_once(request: SearchRequest, http_request: Request) -> SearchRe
         trace_error_payload(observer, exc)
         metrics.increment("search_errors_total", endpoint="search", code=exc.code)
         raise_security_http_error(exc)
+    except SearchAuthenticationError as exc:
+        if active_step is not None:
+            step_error_payload(active_step, exc)
+        trace_error_payload(observer, exc)
+        metrics.increment("search_errors_total", endpoint="search", code=exc.code)
+        raise_search_auth_http_error(exc)
+    except SearchCreditError as exc:
+        if active_step is not None:
+            step_error_payload(active_step, exc)
+        trace_error_payload(observer, exc)
+        metrics.increment("search_errors_total", endpoint="search", code=exc.code)
+        raise_search_credit_http_error(exc)
     except Exception as exc:
         if active_step is not None:
             step_error_payload(active_step, exc)
@@ -518,6 +1080,8 @@ async def search_stream(request: SearchRequest, http_request: Request) -> Stream
 
     async def event_generator() -> AsyncIterator[str]:
         """Yield SSE frames for the complete AI search lifecycle."""
+        nonlocal current_user
+
         observer = SearchObserver(request.query)
         active_step = None
         stream_acquired = False
@@ -540,6 +1104,16 @@ async def search_stream(request: SearchRequest, http_request: Request) -> Stream
             yield format_sse("step_start", security_step.start_payload())
             security_service.check_query(request.query)
             yield format_sse("step_done", step_done_payload(security_step))
+            active_step = None
+
+            auth_step = observer.step("authentication")
+            active_step = auth_step
+            yield format_sse("step_start", auth_step.start_payload())
+            current_user = require_search_user(current_user)
+            yield format_sse(
+                "step_done",
+                step_done_payload(auth_step, user_id=current_user.id),
+            )
             active_step = None
 
             concurrency_step = observer.step("stream_concurrency")
@@ -586,13 +1160,41 @@ async def search_stream(request: SearchRequest, http_request: Request) -> Stream
                 return
             metrics.increment("search_cache_misses_total", mode=request.mode)
 
+            credit_check_step = observer.step("credit_check")
+            active_step = credit_check_step
+            yield format_sse("step_start", credit_check_step.start_payload())
+            user, credit_cost, credit_account = check_search_credit(current_user, request)
+            yield format_sse(
+                "step_done",
+                step_done_payload(
+                    credit_check_step,
+                    required_credits=credit_cost,
+                    balance_before=credit_account.balance,
+                ),
+            )
+            active_step = None
+
             quota_step = observer.step("external_quota")
             active_step = quota_step
             yield format_sse("step_start", quota_step.start_payload())
             cost_guard.reserve_external_quota(client_id)
             yield format_sse("step_done", step_done_payload(quota_step, client_id=client_id))
             active_step = None
-            record_history_if_authenticated(current_user, request)
+
+            credit_debit_step = observer.step("credit_debit")
+            active_step = credit_debit_step
+            yield format_sse("step_start", credit_debit_step.start_payload())
+            credit_ledger = debit_search_credit(user, credit_cost, observer.search_id)
+            yield format_sse(
+                "step_done",
+                step_done_payload(
+                    credit_debit_step,
+                    charged_credits=credit_cost,
+                    balance_after=credit_ledger.balance_after,
+                ),
+            )
+            active_step = None
+            record_history_if_authenticated(user, request)
 
             search_service = get_search_service()
             ai_service = get_ai_service()
@@ -723,6 +1325,24 @@ async def search_stream(request: SearchRequest, http_request: Request) -> Stream
             yield format_sse(
                 "error",
                 security_error_payload(exc, observer.search_id),
+            )
+            metrics.increment("search_errors_total", endpoint="stream", code=exc.code)
+        except SearchAuthenticationError as exc:
+            if active_step is not None:
+                yield format_sse("step_error", step_error_payload(active_step, exc))
+            yield format_sse("trace_error", trace_error_payload(observer, exc))
+            yield format_sse(
+                "error",
+                search_auth_error_payload(exc, observer.search_id),
+            )
+            metrics.increment("search_errors_total", endpoint="stream", code=exc.code)
+        except SearchCreditError as exc:
+            if active_step is not None:
+                yield format_sse("step_error", step_error_payload(active_step, exc))
+            yield format_sse("trace_error", trace_error_payload(observer, exc))
+            yield format_sse(
+                "error",
+                search_credit_error_payload(exc, observer.search_id),
             )
             metrics.increment("search_errors_total", endpoint="stream", code=exc.code)
         except Exception as exc:

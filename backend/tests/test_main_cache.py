@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app import main
 from app.schemas import SearchResult
+from app.services.account_service import AccountService
 from app.services.cost_guard_service import InMemoryCostGuard
 
 
@@ -82,11 +83,29 @@ class EmptySearchService:
 
 
 @pytest.fixture(autouse=True)
-def clear_search_cache() -> None:
-    """Keep tests isolated from the module-level search cache."""
+def clear_search_cache(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep cache tests isolated from module-level state and account data."""
+    account_service = AccountService(
+        str(tmp_path / "accounts.sqlite3"),
+        session_ttl_seconds=3600,
+    )
+    monkeypatch.setattr(main, "account_service", account_service)
     main.search_cache.clear()
     main.cost_guard.reset()
     main.metrics.reset()
+
+
+async def register_cache_user(client: AsyncClient, email: str = "cache@example.com") -> None:
+    """Register a test user so cache-miss searches can spend user credits."""
+    response = await client.post(
+        "/api/auth/register",
+        json={
+            "email": email,
+            "password": "strong-password",
+            "display_name": "Cache User",
+        },
+    )
+    assert response.status_code == 200
 
 
 @pytest.mark.anyio
@@ -101,6 +120,7 @@ async def test_search_once_returns_cached_response_without_repeating_ai(
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await register_cache_user(client)
         first = await client.post("/api/search", json={"query": "DeepSeek V4"})
         second = await client.post("/api/search", json={"query": "  deepseek   v4 "})
 
@@ -124,6 +144,7 @@ async def test_metrics_endpoint_reports_search_counters(
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await register_cache_user(client)
         await client.post("/api/search/stream", json={"query": "DeepSeek V4"})
         metrics = await client.get("/metrics")
 
@@ -154,6 +175,7 @@ async def test_search_stream_blocks_when_external_quota_is_exhausted(
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await register_cache_user(client)
         first = await client.post("/api/search/stream", json={"query": "first query"})
         second = await client.post("/api/search/stream", json={"query": "second query"})
 
@@ -187,6 +209,7 @@ async def test_search_stream_cached_response_does_not_consume_external_quota(
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await register_cache_user(client)
         first = await client.post("/api/search/stream", json={"query": "DeepSeek V4"})
         second = await client.post("/api/search/stream", json={"query": "deepseek v4"})
 
@@ -210,6 +233,7 @@ async def test_search_stream_returns_cache_hit_without_repeating_ai(
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await register_cache_user(client)
         first = await client.post("/api/search/stream", json={"query": "DeepSeek V4"})
         second = await client.post("/api/search/stream", json={"query": "deepseek v4"})
 
@@ -239,6 +263,7 @@ async def test_search_stream_does_not_cache_empty_results(
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await register_cache_user(client)
         first = await client.post("/api/search/stream", json={"query": "empty topic"})
         second = await client.post("/api/search/stream", json={"query": "empty topic"})
 
@@ -263,6 +288,7 @@ async def test_search_stream_reports_failed_step(
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await register_cache_user(client)
         response = await client.post("/api/search/stream", json={"query": "DeepSeek V4"})
 
     assert response.status_code == 200
